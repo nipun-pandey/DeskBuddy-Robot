@@ -18,8 +18,21 @@
 #include <DHT.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include "time.h"
+
+// Optional local configuration. Copy secrets.example.h to secrets.h and fill in
+// your values; secrets.h is intentionally ignored by Git.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#define DESKBUDDY_WIFI_SSID ""
+#define DESKBUDDY_WIFI_PASSWORD ""
+#define DESKBUDDY_WEATHER_API_KEY ""
+#define DESKBUDDY_CITY "Dimapur,IN"
+#endif
 
 
 // ============================================================
@@ -35,10 +48,10 @@
 // ============================================================
 //  WiFi & API CREDENTIALS
 // ============================================================
-const char* ssid       = "S23";
-const char* password   = "64806480@@";
-const char* weatherKey = "ba371108128cd4ff95ec890107d5c6a1";
-const char* city       = "Dimapur,IN";
+const char* ssid       = DESKBUDDY_WIFI_SSID;
+const char* password   = DESKBUDDY_WIFI_PASSWORD;
+const char* weatherKey = DESKBUDDY_WEATHER_API_KEY;
+const char* city       = DESKBUDDY_CITY;
 
 
 // ============================================================
@@ -116,10 +129,19 @@ const unsigned long TAP_GAP_MS    = 450;  // Gap after last tap before sequence 
 //  WEATHER
 // ============================================================
 bool   wifiEverConnected  = false;
+bool   hasWeatherData     = false;
 String currentWeather     = "Clear";
 int    currentTemp        = 0;
 unsigned long lastWeatherUpdate = 0;
 const unsigned long WEATHER_INTERVAL = 1800000; // 30 min
+bool weatherConnectionInProgress = false;
+unsigned long weatherConnectionStarted = 0;
+const unsigned long WEATHER_CONNECTION_TIMEOUT = 10000;
+
+float indoorTemperature = NAN;
+float indoorHumidity = NAN;
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_INTERVAL = 2000;
 
 
 // ============================================================
@@ -218,21 +240,51 @@ void beepTapFeedback(int tapNum) {
 // ============================================================
 //  FUNCTION: updateWeather()
 // ============================================================
-void updateWeather() {
-  if (WiFi.status() != WL_CONNECTED) return;
+bool updateWeather() {
+  if (WiFi.status() != WL_CONNECTED || strlen(weatherKey) == 0) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure(); // Encrypts traffic; use a pinned CA certificate for full validation.
   HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/weather?q="
+  String url = "https://api.openweathermap.org/data/2.5/weather?q="
                + String(city) + "&units=metric&appid=" + String(weatherKey);
-  http.begin(url);
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+  if (!http.begin(client, url)) return false;
   int httpCode = http.GET();
-  if (httpCode > 0) {
-    String payload = http.getString();
-    int tempIdx = payload.indexOf("\"temp\":") + 7;
-    currentTemp = payload.substring(tempIdx, payload.indexOf(",", tempIdx)).toInt();
-    int mainIdx = payload.indexOf("\"main\":\"") + 8;
-    currentWeather = payload.substring(mainIdx, payload.indexOf("\"", mainIdx));
+  bool success = false;
+  if (httpCode == HTTP_CODE_OK) {
+    StaticJsonDocument<768> document;
+    DeserializationError error = deserializeJson(document, http.getStream());
+    float temperature = document["main"]["temp"] | NAN;
+    const char* condition = document["weather"][0]["main"] | "";
+    if (!error && !isnan(temperature) && strlen(condition) > 0) {
+      currentTemp = round(temperature);
+      currentWeather = condition;
+      hasWeatherData = true;
+      success = true;
+    }
   }
   http.end();
+  return success;
+}
+
+void updateSensors(unsigned long now) {
+  if (now - lastSensorRead < SENSOR_INTERVAL) return;
+  lastSensorRead = now;
+
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  if (!isnan(temperature)) indoorTemperature = temperature;
+  if (!isnan(humidity)) indoorHumidity = humidity;
+}
+
+void startWeatherRefresh(unsigned long now) {
+  if (strlen(ssid) == 0 || strlen(weatherKey) == 0 || weatherConnectionInProgress) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  weatherConnectionInProgress = true;
+  weatherConnectionStarted = now;
 }
 
 
@@ -557,14 +609,18 @@ void setup() {
   }
 
   // --- WiFi connection ---
-  WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(200);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.begin(ssid, password);
-
-  bool forceSkip = false, touchWasHigh = false;
+  // No credentials means offline mode: skip connection attempts and start immediately.
+  bool networkConfigured = strlen(ssid) > 0 && strlen(weatherKey) > 0;
+  bool forceSkip = !networkConfigured, touchWasHigh = false;
   unsigned long startAttempt = millis();
 
-  while (WiFi.status() != WL_CONNECTED) {
+  if (networkConfigured) {
+    WiFi.mode(WIFI_STA); WiFi.disconnect(); delay(200);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.begin(ssid, password);
+  }
+
+  while (networkConfigured && WiFi.status() != WL_CONNECTED) {
     bool touchNow = digitalRead(TOUCH_PIN);
     if (touchNow && !touchWasHigh) { forceSkip = true; break; }
     touchWasHigh = touchNow;
@@ -584,6 +640,8 @@ void setup() {
     if (getLocalTime(&timeinfo)) { beepClick(50); } // Success beep
     else { setManualTime(); }
     wifiEverConnected = true;
+    updateWeather();
+    lastWeatherUpdate = millis();
     WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
   } else {
     WiFi.disconnect(true); WiFi.mode(WIFI_OFF); setManualTime();
@@ -642,9 +700,13 @@ void drawHome() {
   // --- Bottom sensor row ---
   u8g2.drawLine(0, 52, 128, 52);
   u8g2.setFont(u8g2_font_6x10_tf);
-  u8g2.setCursor(4, 63);  u8g2.print(dht.readTemperature(), 1); u8g2.print((char)176); u8g2.print("C");
-  u8g2.setCursor(44, 63); u8g2.print((int)dht.readHumidity()); u8g2.print("%");
-  if (wifiEverConnected) {
+  u8g2.setCursor(4, 63);
+  if (isnan(indoorTemperature)) u8g2.print("--.-C");
+  else { u8g2.print(indoorTemperature, 1); u8g2.print((char)176); u8g2.print("C"); }
+  u8g2.setCursor(44, 63);
+  if (isnan(indoorHumidity)) u8g2.print("--%");
+  else { u8g2.print((int)indoorHumidity); u8g2.print("%"); }
+  if (hasWeatherData) {
     u8g2.drawLine(64, 52, 64, 64);
     drawWeatherIcon(74, 58);
     u8g2.setFont(u8g2_font_haxrcorp4089_tr);
@@ -662,9 +724,22 @@ void loop() {
   bool touching = digitalRead(TOUCH_PIN);
 
 
-  // ── 1. BACKGROUND WEATHER UPDATE ─────────────────────────
-  if (WiFi.status() == WL_CONNECTED && (now - lastWeatherUpdate > WEATHER_INTERVAL)) {
-    updateWeather(); lastWeatherUpdate = now;
+  // ── 1. BACKGROUND SENSOR AND WEATHER UPDATES ─────────────
+  updateSensors(now);
+  if (!weatherConnectionInProgress && now - lastWeatherUpdate >= WEATHER_INTERVAL) {
+    startWeatherRefresh(now);
+  }
+  if (weatherConnectionInProgress) {
+    if (WiFi.status() == WL_CONNECTED) {
+      updateWeather();
+      lastWeatherUpdate = now;
+      weatherConnectionInProgress = false;
+      WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+    } else if (now - weatherConnectionStarted >= WEATHER_CONNECTION_TIMEOUT) {
+      weatherConnectionInProgress = false;
+      lastWeatherUpdate = now; // Avoid retrying continuously when the network is unavailable.
+      WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+    }
   }
 
 

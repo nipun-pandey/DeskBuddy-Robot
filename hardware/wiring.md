@@ -1,17 +1,15 @@
 # Wiring Guide
 
-## ESP32 Connections
+The current firmware targets an ESP32-C3 and uses the pin map below.
 
-| Component    | ESP32 Pin |
-| ------------ | --------- |
-| OLED SDA     | GPIO 21   |
-| OLED SCL     | GPIO 22   |
-| Touch Sensor | GPIO 4    |
-| Buzzer       | GPIO 25   |
-| VCC          | 3.3V      |
-| GND          | GND       |
+| Component | ESP32-C3 pin | Notes |
+| --- | --- | --- |
+| SH1106 OLED SDA | GPIO 8 | I2C data |
+| SH1106 OLED SCL | GPIO 9 | I2C clock |
+| DHT11 data | GPIO 6 | Add the module's required pull-up if it does not include one |
+| Passive buzzer signal | GPIO 5 | Use a transistor driver if the buzzer draws more current than a GPIO can safely supply |
+| Touch sensor / button output | GPIO 7 | Firmware expects HIGH when touched/pressed |
+| OLED, DHT11, touch module | 3.3 V | Keep logic at 3.3 V |
+| All components | GND | A common ground is required |
 
-## Notes
-
-* Use pull-up resistors if required.
-* Ensure OLED voltage matches ESP32 (3.3V).
+The firmware initializes I2C with `Wire.begin(8, 9)`. Do not use the older GPIO 21/22 wiring map with this revision.

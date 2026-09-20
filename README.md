@@ -1,84 +1,68 @@
 # DeskBuddy AI Robot 🤖
 
-DeskBuddy AI Robot is a small **ESP32-based desk companion robot** designed to sit on your desk and interact with you through touch, messages, and visual feedback.
+DeskBuddy is an ESP32-C3 desk companion with an SH1106 128×64 OLED display, DHT11 sensor, passive buzzer, clock, weather snapshot, touch gestures, and a Pomodoro timer.
 
-It displays the time, reacts to touch, and can say cute or motivational lines to improve your mood while working or studying.
+## Features
 
----
+- Clock and date, synchronized with NTP when Wi-Fi is configured
+- Indoor temperature and humidity dashboard
+- Weather snapshot refreshed at boot and every 30 minutes
+- Touch gestures for animated reactions, compliments, clock formats, and timer controls
+- Offline fallback: the robot continues to work when Wi-Fi is unavailable
 
-## ✨ Features
+## Hardware
 
-* 🕒 **Clock Display** – Shows current time on the screen
-* 👆 **Touch Interaction** – Responds when you touch the robot
-* 💬 **Cute Compliments** – Displays fun or motivational messages
-* 🤖 **Desk Companion** – Designed as a small interactive desk robot
-* ⚡ **ESP32 Powered** – WiFi + Bluetooth capable microcontroller
-* 📟 **OLED / LCD Display Support**
+| Part | Connection |
+| --- | --- |
+| ESP32-C3 | ESP32-C3 DevKitM-1-compatible board |
+| SH1106 OLED SDA | GPIO 8 |
+| SH1106 OLED SCL | GPIO 9 |
+| DHT11 data | GPIO 6 |
+| Passive buzzer | GPIO 5 |
+| Touch sensor / button | GPIO 7 |
+| All modules | 3.3 V logic and common GND |
 
----
+Do not power motors or other high-current devices from the ESP32-C3 board. Confirm that the OLED and touch module support 3.3 V before connecting them.
 
-## 🧠 Project Idea
+## Gestures
 
-The goal of this project is to create a **friendly desk robot** that:
+| Input | Action |
+| --- | --- |
+| 1 tap | Blink animation and compliment |
+| 2 taps | Heart animation |
+| 3 taps | Excited animation |
+| 4 taps | Pomodoro timer mode |
+| 5 taps | Change clock format |
+| Hold for 1 second | Petting animation |
 
-* keeps you company while working
-* gives small motivational compliments
-* reacts to user interaction
-* displays useful information like time
+In timer mode: one tap starts/pauses, two taps reset or choose the next duration, and three taps exit.
 
-It can later be extended with:
+## Build and upload
 
-* voice interaction
-* AI chatbot integration
-* smart home control
-* reminders and notifications
+1. Install [PlatformIO](https://platformio.org/).
+2. Copy `firmware/esp32/main/secrets.example.h` to `firmware/esp32/main/secrets.h`.
+3. Set your Wi-Fi and OpenWeather API credentials in `secrets.h`. This local file is ignored by Git.
+4. Connect the board and run:
 
----
-
-## 🧰 Hardware Used
-
-* ESP32 Development Board
-* OLED / LCD Display
-* Touch Sensor Module
-* Power Supply / USB
-* Optional Speaker / Buzzer
-
----
-
-## 🖥️ Project Structure
-
-```
-DeskBuddy-AI-Robot
-│
-├── firmware        # ESP32 code
-├── hardware        # circuit diagrams
-├── docs            # project documentation
-├── images          # photos and demo images
-└── README.md
+```sh
+pio run --target upload
+pio device monitor --baud 115200
 ```
 
----
+The default target is `esp32-c3-devkitm-1`. Change the board in `platformio.ini` if your ESP32-C3 board uses a different definition.
 
-## 🚀 Future Improvements
+## Project layout
 
-* Voice assistant support
-* Mobile app integration
-* WiFi notifications
-* Face or gesture detection
-* AI conversation mode
+```text
+firmware/esp32/main/  ESP32 firmware and local configuration example
+hardware/             Wiring documentation
+docs/                 Design and interaction notes
+```
 
----
+## Security
 
-## 📸 Demo (Coming Soon)
+Never commit `secrets.h`. If credentials were ever committed to a public remote, rotate them and remove them from Git history before sharing the repository further.
 
-Images and videos of the robot in action will be added here.
+## License
 
----
-
-## 👨‍💻 Author
-
-**Nipun**
-
-Embedded Systems & Robotics Projects
-ESP32 • IoT • Robotics
-# DeskBuddy AI Robot 🤖
+MIT. See [LICENSE](LICENSE).
