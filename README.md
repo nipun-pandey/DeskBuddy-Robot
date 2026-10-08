@@ -14,6 +14,7 @@ DeskBuddy is an ESP32-C3 desk companion with an SH1106 128×64 OLED display, DHT
 - Small heart badge on the home clock and a gesture to retry NTP sync
 - Sleepy, curious, sad, listening, and celebration expressions
 - Touch gestures for animated reactions, compliments, clock formats, and timer controls
+- A short rising-pitch buzzer tone immediately confirms every tap, including each tap in a multi-tap gesture
 - Home clock boots in 12-hour format with seconds
 - Offline fallback: the robot continues to work when Wi-Fi is unavailable
 

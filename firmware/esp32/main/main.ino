@@ -1,15 +1,8 @@
 // ============================================================
-//  R O M I  —  Robot Companion Firmware  v3
-//  Hardware : ESP32-C3 + SH1106 128×64 OLED + DHT11 + Buzzer
-//  Display  : U8g2 library (full-buffer mode)
-//
-//  CHANGES IN v3:
-//    • Timer auto-resets to chosen duration when countdown ends
-//    • 5-second countdown warning: escalating beeps at 5,4,3,2,1s
-//    • Timer finish: loud triple alarm-clock beep sequence
-//    • HEART state: larger pulsing hearts + breathing scale effect
-//    • Fireworks replaced with sky-rocket: dot trails up → burst
-//    • Touch tap feedback: distinct ascending beep tones per tap count
+//  ROMI — ESP32-C3 desk companion
+//  SH1106 OLED, DHT11, passive buzzer, touch input, Wi-Fi, and BLE time set.
+//  Includes clock/weather dashboard, room alerts, expressions, Pomodoro timer,
+//  persistent stopwatch, rocket/heart animation, and audible feedback on every tap.
 // ============================================================
 
 #include <Arduino.h>
@@ -238,26 +231,6 @@ void beepClick(int durationMs = 8) {
   digitalWrite(BUZZER_PIN, LOW);
 }
 
-// Ascending chirp — plays a rising two-tone sequence
-// Used as tap feedback: higher tap count → higher pitch feel
-// freqDelay: lower = higher perceived pitch (shorter HIGH time)
-void beepChirp(int freqDelay, int cycles = 80) {
-  for (int i = 0; i < cycles; i++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delayMicroseconds(freqDelay);
-    digitalWrite(BUZZER_PIN, LOW);
-    delayMicroseconds(freqDelay);
-  }
-}
-
-// Warning beep — single mid-pitch pulse, used for 5s countdown
-void beepWarning() {
-  for (int i = 0; i < 120; i++) {
-    digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(800);
-    digitalWrite(BUZZER_PIN, LOW);  delayMicroseconds(800);
-  }
-}
-
 // Alarm beep — loud triple burst, used when timer finishes
 // Three groups of rapid buzzing separated by 80ms gaps
 void beepAlarm() {
@@ -270,18 +243,18 @@ void beepAlarm() {
   }
 }
 
-// Tap feedback beep — pitch rises with tap count
-// 1 tap = lowest, 5 taps = highest
-// baseDelay controls the wave period: smaller = higher pitch
+// Immediate acknowledgement for every released tap. The short square-wave
+// tone is audible on a passive buzzer and leaves the touch loop responsive.
 void beepTapFeedback(int tapNum) {
-  // Each successive tap gets a shorter delay = higher perceived pitch
-  // Delays (µs): 1→1800, 2→1500, 3→1200, 4→900, 5→600
-  int delays[] = {1800, 1500, 1200, 900, 600};
-  int d = delays[constrain(tapNum - 1, 0, 4)];
-  // Play two quick bursts to make it feel snappy
-  beepChirp(d, 60);
-  delay(15);
-  beepChirp(d, 40);
+  // Higher tap numbers get a higher pitch. Duration stays under 30 ms.
+  const uint16_t halfPeriodsUs[] = {1000, 900, 800, 700, 600};
+  uint16_t halfPeriod = halfPeriodsUs[constrain(tapNum - 1, 0, 4)];
+  for (int cycle = 0; cycle < 14; cycle++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delayMicroseconds(halfPeriod);
+    digitalWrite(BUZZER_PIN, LOW);
+    delayMicroseconds(halfPeriod);
+  }
 }
 
 // ============================================================
@@ -1156,7 +1129,6 @@ void loop() {
 
   // C) Falling edge: finger lifted
   if (!touching && lastTouchState) {
-    beepClick(8); // Immediate acknowledgement while a multi-tap is collected.
     if (currentState == PETTING) {
       currentState   = previousState;      // Return to prior state
       isTimerRunning = wasTimerRunning;    // Restore timer
@@ -1164,6 +1136,9 @@ void loop() {
     } else if (currentState == SECRET_GIFT) {
       currentState = HOME;
     } else {
+      // A rising-pitch tone confirms each physical tap immediately, including
+      // every tap in a multi-tap gesture; it does not wait for gesture dispatch.
+      beepTapFeedback(tapCount + 1);
       // A short tap after the nine-tap sequence cancels the secret gesture.
       secretGiftArmed = false;
       // Keep the current screen while collecting taps. Dispatch only after the
@@ -1224,12 +1199,10 @@ void loop() {
       if (tapCount == 1) {
         isTimerRunning = !isTimerRunning;
         lastTick = now;
-        beepChirp(isTimerRunning ? 600 : 1400, 80);
       }
       else if (tapCount == 2) {
         isTimerRunning = false;
         remainingSeconds = timerFullSeconds;
-        beepChirp(1000, 100);
       }
       else if (tapCount == 3) {
         isTimerRunning = false;
@@ -1237,17 +1210,14 @@ void loop() {
         timerFullSeconds = (long)timerOptions[currentOptionIndex] * 60;
         remainingSeconds = timerFullSeconds;
         lastTick = now;
-        beepChirp(1000, 100);
       }
       else if (tapCount == 4) {
         isTimerRunning = false;
         currentState = STOPWATCH_MODE;
-        beepChirp(1000, 100);
       }
       else if (tapCount == 5) {
         isTimerRunning = false;
         currentState = HOME;
-        beepChirp(500, 60);
       }
 
     } else if (currentState == STOPWATCH_MODE) {
@@ -1260,13 +1230,11 @@ void loop() {
           stopwatchStartedAt = now;
           stopwatchRunning = true;
         }
-        beepChirp(stopwatchRunning ? 600 : 1400, 80);
       }
       else if (tapCount == 2) {
         stopwatchRunning = false;
         stopwatchElapsedMs = 0;
         saveStopwatch();
-        beepChirp(1000, 100);
       }
       else if (tapCount == 3) {
         if (stopwatchRunning) {
@@ -1277,7 +1245,6 @@ void loop() {
         currentState = TIMER_MODE;
         isTimerRunning = false;
         lastTick = now;
-        beepChirp(1000, 100);
       }
       else if (tapCount == 4) {
         if (stopwatchRunning) {
@@ -1286,35 +1253,29 @@ void loop() {
         }
         saveStopwatch();
         currentState = HOME;
-        beepChirp(500, 60);
       }
 
     } else {
       // --- Normal tap actions ---
 
       if (tapCount == 1) {
-        beepTapFeedback(1);
         currentState   = BLINK;
         stateStartTime = millis();
       }
       else if (tapCount == 2) {
-        beepTapFeedback(2);
         initRockets();               // Reset rocket system for HEART state
         currentState   = HEART;
         stateStartTime = now;
       }
       else if (tapCount == 3) {
-        beepTapFeedback(3);
         currentState   = STOPWATCH_MODE;
         isTimerRunning = false;
         lastTick       = now;
       }
       else if (tapCount == 4) {
-        beepTapFeedback(4);
         clockFormat = (clockFormat + 1) % 4;
       }
       else if (tapCount == 5) {
-        beepTapFeedback(5);
         currentState   = EXCITED;
         stateStartTime = now;
       }
