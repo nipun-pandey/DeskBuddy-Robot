@@ -1525,61 +1525,46 @@ void loop() {
     // ── BLINK ────────────────────────────────────────────────
     case BLINK: {
       unsigned long elapsed = now - stateStartTime;
-      float gaze = 0.0f, eyeScale = 1.0f, closure = 0.0f;
+      float gaze = 0.0f;
+      float closure = 0.0f;
+      float eyeScale = 1.0f;
 
-      // A quick, readable two-second reaction: wake, glance, blink, smile.
-      if (elapsed < 280) {
-        eyeScale = 0.86f + 0.24f * easeInOut(elapsed / 280.0f);
-      } else if (elapsed < 660) {
-        eyeScale = 1.10f;
-        gaze = -7.0f * easeInOut((elapsed - 280) / 380.0f);
-      } else if (elapsed < 1060) {
-        eyeScale = 1.10f;
-        gaze = -7.0f + 14.0f * easeInOut((elapsed - 660) / 400.0f);
-      } else if (elapsed < 1280) {
-        eyeScale = 1.10f;
-        gaze = 7.0f * (1.0f - easeInOut((elapsed - 1060) / 220.0f));
-      } else if (elapsed < 1600) {
-        eyeScale = 1.10f;
-      } else {
-        float settle = easeInOut(min((elapsed - 1600) / 400.0f, 1.0f));
-        eyeScale = 1.10f - 0.08f * settle + 0.012f * sinf((elapsed - 1600) * 0.009f);
-      }
-      if (elapsed >= 1640 && elapsed < SINGLE_TAP_ANIMATION_MS) {
-        float flourish = (elapsed - 1640) / 360.0f;
-        float pulse = sinf(PI * flourish);
-        gaze = 2.0f * pulse;
-        eyeScale = 1.04f + 0.04f * pulse;
+      // Follow the older, easy-to-read sequence: glance left, glance right,
+      // return to center, blink, then hold a warm smile for the full 2 seconds.
+      if (elapsed < 400) {
+        gaze = -7.0f * easeInOut(elapsed / 400.0f);
+      } else if (elapsed < 800) {
+        gaze = -7.0f + 14.0f * easeInOut((elapsed - 400) / 400.0f);
+      } else if (elapsed < 1000) {
+        gaze = 7.0f * (1.0f - easeInOut((elapsed - 800) / 200.0f));
+      } else if (elapsed < 1400) {
+        float breath = sinf((elapsed - 1400) * (PI / 600.0f));
+        eyeScale = 1.0f + 0.035f * breath;
       }
 
-      // Smooth close and reopen in the middle of the short reaction.
-      if (elapsed >= 1280 && elapsed < 1440) closure = easeInOut((elapsed - 1280) / 160.0f);
-      else if (elapsed >= 1440 && elapsed < 1480) closure = 1.0f;
-      else if (elapsed >= 1480 && elapsed < 1640) closure = 1.0f - easeInOut((elapsed - 1480) / 160.0f);
-      // A quick, softer second blink gives the smile a playful finish.
-      if (elapsed >= 1700 && elapsed < 1760) closure = easeInOut((elapsed - 1700) / 60.0f);
-      else if (elapsed >= 1760 && elapsed < 1780) closure = 1.0f;
-      else if (elapsed >= 1780 && elapsed < 1840) closure = 1.0f - easeInOut((elapsed - 1780) / 60.0f);
+      // One gentle close and reopen, like the original ROMI animation.
+      if (elapsed >= 1000 && elapsed < 1120) closure = easeInOut((elapsed - 1000) / 120.0f);
+      else if (elapsed >= 1120 && elapsed < 1260) closure = 1.0f;
+      else if (elapsed >= 1260 && elapsed < 1400) closure = 1.0f - easeInOut((elapsed - 1260) / 140.0f);
 
       bool touchResponse = touching && currentState == BLINK;
-      if (touchResponse) { gaze = 0.0f; eyeScale = 1.10f; closure = 0.0f; }
-      bool surprised = touchResponse || elapsed < 280;
+      if (touchResponse) { gaze = 0.0f; closure = 0.0f; eyeScale = 1.04f; }
+      bool surprised = elapsed < 160;
       int pX = (int)lroundf(gaze);
-      bool happyBrow = surprised || (elapsed >= 1640 && elapsed < SINGLE_TAP_ANIMATION_MS);
-      drawBlinkBrow(30, 25, happyBrow);
-      drawBlinkBrow(98, 25, happyBrow);
+      drawBlinkBrow(30, 25, surprised || elapsed >= 1400);
+      drawBlinkBrow(98, 25, surprised || elapsed >= 1400);
       drawSoftBlinkEye(30, 25, pX, 0, closure, eyeScale);
       drawSoftBlinkEye(98, 25, pX, 0, closure, eyeScale);
-      int smileBob = elapsed >= 1640 ? (int)lroundf(sinf((elapsed - 1640) * 0.017f)) : 0;
+      int smileBob = elapsed >= 1400 ? (int)lroundf(sinf((elapsed - 1400) * (PI / 300.0f))) : 0;
       drawUltraMouth(64, 60 + smileBob, surprised);
-      if (elapsed >= 1640) {
+      if (elapsed >= 1400) {
         u8g2.drawLine(51, 49, 55, 51); u8g2.drawPixel(50, 47);
         u8g2.drawLine(73, 51, 77, 49); u8g2.drawPixel(78, 47);
-        bool sparkleBright = ((elapsed / 100) % 2 == 0);
+        bool sparkleBright = ((elapsed / 140) % 2 == 0);
         drawLoveSparkle(9, 40, sparkleBright);
         drawLoveSparkle(118, 40, sparkleBright);
       }
-      if (elapsed >= 1400 && elapsed < 1440 && !isAutoBlink) beepClick(2);
+      if (elapsed >= 1000 && elapsed < 1020 && !isAutoBlink) beepClick(2);
 
       if (elapsed >= SINGLE_TAP_ANIMATION_MS) {
         currentState   = isAutoBlink ? HOME : COMPLIMENT;
