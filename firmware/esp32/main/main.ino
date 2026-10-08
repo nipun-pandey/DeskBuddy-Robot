@@ -673,8 +673,8 @@ void drawMovingEye(int x, int y, bool closed, int pupilOffset) {
   } else {
     u8g2.drawRBox(x - 17, y - 17, 34, 34, 5); // Big square eye
     u8g2.setDrawColor(0);
-    u8g2.drawRBox(x - 6 + pupilOffset, y - 10, 4, 12, 1); // Left pupil slit
-    u8g2.drawRBox(x + 2 + pupilOffset, y - 10, 4, 12, 1); // Right pupil slit
+    // One centered pupil per eye; offset moves the gaze as a single unit.
+    u8g2.drawRBox(x - 2 + pupilOffset, y - 10, 4, 12, 1);
     u8g2.setDrawColor(1);
   }
 }
@@ -699,14 +699,11 @@ void drawSoftBlinkEye(int x, int y, int pupilOffset, int pupilYOffset,
   int eyeTop = y - eyeHeight / 2;
   u8g2.drawRBox(x - eyeWidth / 2, eyeTop, eyeWidth, eyeHeight, min(6, eyeHeight / 2));
   if (closure < 0.48f) {
-    int pupilSpacing = (int)lroundf(5.0f * scale);
     int pupilRadius = max(2, (int)lroundf(3.0f * scale));
     u8g2.setDrawColor(0);
-    u8g2.drawDisc(x - pupilSpacing + pupilOffset, y + pupilYOffset, pupilRadius);
-    u8g2.drawDisc(x + pupilSpacing + pupilOffset, y + pupilYOffset, pupilRadius);
+    u8g2.drawDisc(x + pupilOffset, y + pupilYOffset, pupilRadius);
     u8g2.setDrawColor(1);
-    u8g2.drawPixel(x - pupilSpacing + pupilOffset - 1, y + pupilYOffset - 1);
-    u8g2.drawPixel(x + pupilSpacing + pupilOffset - 1, y + pupilYOffset - 1);
+    u8g2.drawPixel(x + pupilOffset - 1, y + pupilYOffset - 1);
   }
 }
 
