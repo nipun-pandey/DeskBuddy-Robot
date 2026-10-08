@@ -145,6 +145,7 @@ const unsigned long SECRET_GIFT_ARM_MS = 5000;
 
 const unsigned long LONG_PRESS_MS = 1000; // Hold > 1s → PETTING
 const unsigned long TAP_GAP_MS    = 850;  // Allow relaxed multi-taps before choosing an action
+const unsigned long SINGLE_TAP_ANIMATION_MS = 2000;
 const unsigned long TOUCH_DEBOUNCE_MS = 20;
 bool touchRawState = LOW;
 unsigned long touchRawChangedAt = 0;
@@ -1523,33 +1524,32 @@ void loop() {
 
     // ── BLINK ────────────────────────────────────────────────
     case BLINK: {
-      // Half-speed animation clock gives the single-tap reaction a 2-second run.
-      unsigned long elapsed = (now - stateStartTime) / 2UL;
+      unsigned long elapsed = now - stateStartTime;
       float gaze = 0.0f, eyeScale = 1.0f, closure = 0.0f;
 
       // A quick, readable two-second reaction: wake, glance, blink, smile.
-      if (elapsed < 140) {
-        eyeScale = 0.86f + 0.24f * easeInOut(elapsed / 140.0f);
-      } else if (elapsed < 330) {
+      if (elapsed < 280) {
+        eyeScale = 0.86f + 0.24f * easeInOut(elapsed / 280.0f);
+      } else if (elapsed < 660) {
         eyeScale = 1.10f;
-        gaze = -7.0f * easeInOut((elapsed - 140) / 190.0f);
-      } else if (elapsed < 530) {
+        gaze = -7.0f * easeInOut((elapsed - 280) / 380.0f);
+      } else if (elapsed < 1060) {
         eyeScale = 1.10f;
-        gaze = -7.0f + 14.0f * easeInOut((elapsed - 330) / 200.0f);
-      } else if (elapsed < 640) {
+        gaze = -7.0f + 14.0f * easeInOut((elapsed - 660) / 400.0f);
+      } else if (elapsed < 1280) {
         eyeScale = 1.10f;
-        gaze = 7.0f * (1.0f - easeInOut((elapsed - 530) / 110.0f));
-      } else if (elapsed < 800) {
+        gaze = 7.0f * (1.0f - easeInOut((elapsed - 1060) / 220.0f));
+      } else if (elapsed < 1600) {
         eyeScale = 1.10f;
       } else {
-        float settle = easeInOut(min((elapsed - 800) / 200.0f, 1.0f));
-        eyeScale = 1.10f - 0.08f * settle + 0.012f * sinf((elapsed - 800) * 0.018f);
+        float settle = easeInOut(min((elapsed - 1600) / 400.0f, 1.0f));
+        eyeScale = 1.10f - 0.08f * settle + 0.012f * sinf((elapsed - 1600) * 0.009f);
       }
 
       // Smooth close and reopen in the middle of the short reaction.
-      if (elapsed >= 640 && elapsed < 720) closure = easeInOut((elapsed - 640) / 80.0f);
-      else if (elapsed >= 720 && elapsed < 740) closure = 1.0f;
-      else if (elapsed >= 740 && elapsed < 820) closure = 1.0f - easeInOut((elapsed - 740) / 80.0f);
+      if (elapsed >= 1280 && elapsed < 1440) closure = easeInOut((elapsed - 1280) / 160.0f);
+      else if (elapsed >= 1440 && elapsed < 1480) closure = 1.0f;
+      else if (elapsed >= 1480 && elapsed < 1640) closure = 1.0f - easeInOut((elapsed - 1480) / 160.0f);
 
       bool touchResponse = touching && currentState == BLINK;
       if (touchResponse) { gaze = 0.0f; eyeScale = 1.10f; closure = 0.0f; }
@@ -1560,15 +1560,15 @@ void loop() {
       drawSoftBlinkEye(30, 25, pX, 0, closure, eyeScale);
       drawSoftBlinkEye(98, 25, pX, 0, closure, eyeScale);
       drawUltraMouth(64, 60, surprised);
-      if (elapsed >= 820) {
+      if (elapsed >= 1640) {
         u8g2.drawLine(51, 49, 55, 51); u8g2.drawPixel(50, 47);
         u8g2.drawLine(73, 51, 77, 49); u8g2.drawPixel(78, 47);
         drawLoveSparkle(9, 40, false);
         drawLoveSparkle(118, 40, false);
       }
-      if (elapsed >= 700 && elapsed < 720 && !isAutoBlink) beepClick(2);
+      if (elapsed >= 1400 && elapsed < 1440 && !isAutoBlink) beepClick(2);
 
-      if (elapsed >= 1000) {
+      if (elapsed >= SINGLE_TAP_ANIMATION_MS) {
         currentState   = isAutoBlink ? HOME : COMPLIMENT;
         if (!isAutoBlink) { selectedCompliment = random(0, 100); stateStartTime = millis(); }
       }
