@@ -144,7 +144,7 @@ unsigned long secretGiftArmedAt = 0;
 const unsigned long SECRET_GIFT_ARM_MS = 5000;
 
 const unsigned long LONG_PRESS_MS = 1000; // Hold > 1s → PETTING
-const unsigned long TAP_GAP_MS    = 550;  // Wait for the full gesture before choosing its action
+const unsigned long TAP_GAP_MS    = 850;  // Allow relaxed multi-taps before choosing an action
 const unsigned long TOUCH_DEBOUNCE_MS = 20;
 bool touchRawState = LOW;
 unsigned long touchRawChangedAt = 0;
