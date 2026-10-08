@@ -4,10 +4,17 @@ DeskBuddy is an ESP32-C3 desk companion with an SH1106 128×64 OLED display, DHT
 
 ## Features
 
-- Clock and date, synchronized with NTP when Wi-Fi is configured
+- Clock and date, with hourly NTP refreshes while the home screen is idle
+- If saved Wi-Fi is unavailable, scans nearby open Wi-Fi networks and tries NTP
+- Uses the firmware build time as a fallback when no NTP network is reachable
 - Indoor temperature and humidity dashboard
-- Weather snapshot refreshed at boot and every 30 minutes
+- Hot/cold and high/low humidity alerts on the home screen
+- Current weather and a three-hour forecast when an OpenWeather key is configured
+- BLE time setting from a phone or generic BLE utility
+- Small heart badge on the home clock and a gesture to retry NTP sync
+- Sleepy, curious, sad, listening, and celebration expressions
 - Touch gestures for animated reactions, compliments, clock formats, and timer controls
+- Home clock boots in 12-hour format with seconds
 - Offline fallback: the robot continues to work when Wi-Fi is unavailable
 
 ## Hardware
@@ -28,14 +35,18 @@ Do not power motors or other high-current devices from the ESP32-C3 board. Confi
 
 | Input | Action |
 | --- | --- |
-| 1 tap | Blink animation and compliment |
+| 1 tap | Two-second blink animation, then a one-second compliment |
 | 2 taps | Heart animation |
-| 3 taps | Excited animation |
-| 4 taps | Pomodoro timer mode |
-| 5 taps | Change clock format |
+| 3 taps | Stopwatch mode |
+| 4 taps | Change clock format |
+| 5 taps | Excited animation |
 | Hold for 1 second | Petting animation |
+| 6 taps | Show current weather and three-hour forecast |
+| 7 taps | Cycle through the five new expressions |
+| 8 taps | Retry clock sync over Wi-Fi |
+| 9 taps, then hold within 5 seconds | Secret message |
 
-In timer mode: one tap starts/pauses, two taps reset or choose the next duration, and three taps exit.
+In stopwatch mode: one tap starts/pauses, two taps reset to zero, three taps switch to timer mode, and four taps exit while saving elapsed time. In timer mode: one tap starts/pauses, two taps reset the selected duration, three taps cycle through timer durations, four taps switch back to the stopwatch, and five taps exit while preserving the remaining time. The stopwatch value is restored after reboot.
 
 ## Build and upload
 
@@ -48,6 +59,21 @@ In timer mode: one tap starts/pauses, two taps reset or choose the next duration
 pio run --target upload
 pio device monitor --baud 115200
 ```
+
+At startup, ROMI tries the saved Wi-Fi network first. If it cannot sync the
+clock there, it tries nearby open networks from strongest signal to weakest.
+Open networks with captive portals or without Internet access cannot provide
+time; in that case ROMI starts with the firmware build timestamp. BLE time
+setting is available through a BLE utility or an app that can write the
+documented timestamp characteristic.
+
+To set time over BLE, connect to the device named `ROMI` and write the current
+Unix UTC timestamp as decimal text to characteristic
+`a7e10002-8f5d-4b4a-9d42-4e8b7a0c0001` in service
+`a7e10001-8f5d-4b4a-9d42-4e8b7a0c0001`. Seconds and 13-digit milliseconds are
+accepted. ROMI retries NTP hourly while the home screen is idle; use the
+eight-tap gesture to retry immediately. The top-right heart is decorative.
+Sensor alert limits are 16–30 °C and 25–70% humidity.
 
 The default target is `esp32-c3-devkitm-1`. Change the board in `platformio.ini` if your ESP32-C3 board uses a different definition.
 
