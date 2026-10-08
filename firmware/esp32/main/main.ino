@@ -139,13 +139,12 @@ unsigned long stateStartTime = 0; // When current state started (for animations)
 unsigned long lastTouchTime  = 0; // Timestamp of last press or release event
 int  tapCount       = 0;          // Tap counter — cleared after TAP_GAP_MS silence
 bool lastTouchState = LOW;        // Previous frame touch state for edge detection
-bool singleTapPreviewActive = false;
 bool secretGiftArmed = false;
 unsigned long secretGiftArmedAt = 0;
 const unsigned long SECRET_GIFT_ARM_MS = 5000;
 
 const unsigned long LONG_PRESS_MS = 1000; // Hold > 1s → PETTING
-const unsigned long TAP_GAP_MS    = 350;  // Shorter wait makes single taps feel responsive
+const unsigned long TAP_GAP_MS    = 550;  // Wait for the full gesture before choosing its action
 const unsigned long TOUCH_DEBOUNCE_MS = 20;
 bool touchRawState = LOW;
 unsigned long touchRawChangedAt = 0;
@@ -1166,15 +1165,9 @@ void loop() {
     } else {
       // A short tap after the nine-tap sequence cancels the secret gesture.
       secretGiftArmed = false;
-      // Start a likely single-tap reaction immediately. A second tap during
-      // the gesture window still replaces it with its multi-tap action.
-      if (tapCount == 0 && currentState == HOME) {
-        currentState = BLINK;
-        stateStartTime = now;
-        isAutoBlink = false;
-        singleTapPreviewActive = true;
-      }
-      tapCount++; // Count this tap — action fires after TAP_GAP_MS silence
+      // Keep the current screen while collecting taps. Dispatch only after the
+      // gesture gap so a multi-tap never starts the single-tap animation first.
+      tapCount++;
     }
     lastTouchTime = now;
   }
@@ -1299,11 +1292,9 @@ void loop() {
       // --- Normal tap actions ---
 
       if (tapCount == 1) {
-        if (!singleTapPreviewActive || currentState != BLINK) {
-          beepTapFeedback(1);
-          currentState   = BLINK;
-          stateStartTime = millis();
-        }
+        beepTapFeedback(1);
+        currentState   = BLINK;
+        stateStartTime = millis();
       }
       else if (tapCount == 2) {
         beepTapFeedback(2);
@@ -1351,7 +1342,6 @@ void loop() {
     }
 
     tapCount = 0; // Always clear after dispatching
-    singleTapPreviewActive = false;
   }
 
 
