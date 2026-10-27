@@ -473,22 +473,12 @@ void updateApplicationState(unsigned long now = 0) {
           showToast("RESET", 1000);
           beepClick(25);
         } else if (activeTapCount >= 3) {
-          // 3 Taps: EXIT to Home
-          if (stopwatchRunning) {
-            stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-            stopwatchRunning = false;
-            saveStopwatch();
-          }
+          // 3 Taps: EXIT to Home (Preserves working or paused state)
           currentAppState = STATE_HOME;
           beepClick(15);
         }
       } else if (activeGesture == GESTURE_LONG_PRESS) {
-        // Long Press: EXIT to Home
-        if (stopwatchRunning) {
-          stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-          stopwatchRunning = false;
-          saveStopwatch();
-        }
+        // Long Press: EXIT to Home (Preserves working or paused state)
         currentAppState = STATE_HOME;
         beepClick(15);
       }
@@ -974,7 +964,14 @@ void renderHome(unsigned long now) {
     u8g2.drawStr(2, 9, "DESKBUDDY");
   }
 
-  const char* tzLabel = clockSynchronized ? "IST" : "--";
+  char tzLabel[16] = "";
+  if (stopwatchRunning) {
+    snprintf(tzLabel, sizeof(tzLabel), "SW %s", clockSynchronized ? "IST" : "");
+  } else if (pomodoroRunning) {
+    snprintf(tzLabel, sizeof(tzLabel), "TM %s", clockSynchronized ? "IST" : "");
+  } else {
+    strncpy(tzLabel, clockSynchronized ? "IST" : "--", sizeof(tzLabel));
+  }
   int tzW = u8g2.getStrWidth(tzLabel);
   u8g2.drawStr(126 - tzW, 9, tzLabel);
   u8g2.drawLine(0, 11, 128, 11);
