@@ -22,6 +22,7 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <esp_sntp.h>
+#include <esp_wifi.h>
 #include <time.h>
 
 // Wi-Fi Configuration
@@ -609,16 +610,29 @@ void networkWorkerTask(void* parameter) {
       if (strlen(ssid) > 0) {
         Serial.printf("[NET] Connecting to Wi-Fi '%s'...\n", ssid);
         WiFi.mode(WIFI_STA);
+
+        // Configure PMF and WPA2/WPA3 compatibility for modern smartphone hotspots (Samsung S23, etc.)
+        wifi_config_t conf;
+        memset(&conf, 0, sizeof(conf));
+        strncpy((char*)conf.sta.ssid, ssid, sizeof(conf.sta.ssid) - 1);
+        strncpy((char*)conf.sta.password, pass, sizeof(conf.sta.password) - 1);
+        conf.sta.pmf_cfg.capable = true;
+        conf.sta.pmf_cfg.required = false;
+        esp_wifi_set_config(WIFI_IF_STA, &conf);
+
         WiFi.begin(ssid, pass);
 
         unsigned long startConnect = millis();
-        while (WiFi.status() != WL_CONNECTED && (millis() - startConnect < 12000)) {
-          vTaskDelay(pdMS_TO_TICKS(150));
+        while (WiFi.status() != WL_CONNECTED && (millis() - startConnect < 15000)) {
+          vTaskDelay(pdMS_TO_TICKS(200));
+          Serial.print(".");
         }
+        Serial.println();
 
         if (WiFi.status() == WL_CONNECTED) {
           Serial.print("[NET] Connected! IP: ");
           Serial.println(WiFi.localIP());
+          Serial.printf("[NET] Gateway: %s, RSSI: %d dBm\n", WiFi.gatewayIP().toString().c_str(), WiFi.RSSI());
           Serial.println("[NET] Synchronizing NTP (IST UTC+05:30)...");
           configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
 
@@ -644,13 +658,23 @@ void networkWorkerTask(void* parameter) {
             Serial.println("[NET] NTP sync timed out.");
           }
         } else {
-          showToast("! WIFI FAILED", 2000);
-          Serial.println("[NET] Wi-Fi connection failed. Check SSID/password or 2.4 GHz signal.");
+          int st = (int)WiFi.status();
+          const char* stNames[] = {"IDLE", "NO_SSID_AVAIL", "SCAN_COMPLETED", "CONNECTED", "CONNECT_FAILED", "CONNECTION_LOST", "DISCONNECTED"};
+          const char* stStr = (st >= 0 && st <= 6) ? stNames[st] : "UNKNOWN";
+          Serial.printf("[NET] Wi-Fi connection failed. Status: %s (%d)\n", stStr, st);
+          if (st == 1) {
+            Serial.println("[NET] -> SSID not found on 2.4 GHz.");
+            showToast("! NO SSID FOUND", 2500);
+          } else if (st == 4) {
+            Serial.println("[NET] -> Password rejected by Wi-Fi network.");
+            showToast("! BAD PASSWORD", 2000);
+          } else {
+            showToast("! WIFI FAILED", 2000);
+          }
         }
 
-        // Always power off Wi-Fi modem immediately after sync to save power
-        WiFi.disconnect(true);
-        WiFi.mode(WIFI_OFF);
+        // Keep Wi-Fi connected or disconnect without de-initializing the radio
+        WiFi.disconnect();
       } else {
         showToast("! NO WIFI SET", 2000);
         Serial.println("[NET] No Wi-Fi SSID configured.");
@@ -797,6 +821,18 @@ void handleTimeSync(unsigned long now = 0) {
           triggerNetworkSync();
           showToast("SYNCING TIME...");
           Serial.println("[SERIAL] Triggered Wi-Fi and NTP sync.");
+        } else if (strcasecmp(serialCmdBuf, "SCAN") == 0) {
+          Serial.println("[WIFI] Scanning 2.4 GHz Wi-Fi networks...");
+          WiFi.mode(WIFI_STA);
+          WiFi.disconnect();
+          delay(100);
+          int n = WiFi.scanNetworks();
+          Serial.printf("[WIFI] Scan complete. Found %d networks:\n", n);
+          for (int i = 0; i < n; i++) {
+            Serial.printf("  [%d] SSID: '%s' | RSSI: %d dBm | Ch: %d | %s\n",
+                          i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), WiFi.channel(i),
+                          WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "Open" : "Encrypted");
+          }
         } else if (strcasecmp(serialCmdBuf, "STATUS") == 0) {
           struct tm ti = {};
           getLocalTime(&ti, 50);
