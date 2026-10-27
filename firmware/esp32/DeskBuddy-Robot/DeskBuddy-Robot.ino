@@ -84,6 +84,29 @@ void showToast(const char* msg, unsigned long durationMs = 1800) {
   toastEndTime = millis() + durationMs;
 }
 
+// Configurable Wi-Fi Credentials (NVS-backed)
+char configuredSsid[33] = "";
+char configuredPass[65] = "";
+
+// Helper: Compact Time String for Headers (e.g. "4:15P" or "16:15")
+void getCompactClockStr(char* buf, size_t maxLen) {
+  struct tm ti = {};
+  if (!clockSynchronized || !getLocalTime(&ti, 50)) {
+    strncpy(buf, "--:--", maxLen);
+    buf[maxLen - 1] = '\0';
+    return;
+  }
+  int h12 = ti.tm_hour % 12;
+  if (h12 == 0) h12 = 12;
+  const char* suffix = (ti.tm_hour >= 12) ? "P" : "A";
+
+  if (clockFormat == 0 || clockFormat == 1) {
+    snprintf(buf, maxLen, "%d:%02d%s", h12, ti.tm_min, suffix);
+  } else {
+    snprintf(buf, maxLen, "%02d:%02d", ti.tm_hour, ti.tm_min);
+  }
+}
+
 // ============================================================
 //  TIMER & STOPWATCH DATA
 // ============================================================
@@ -99,6 +122,8 @@ unsigned long pomodoroAccumulatedMs = 0;
 bool pomodoroCompleted      = false;
 unsigned long pomodoroCompleteUntil = 0;
 uint32_t lastWarningSec     = 0;
+unsigned long pomodoroMinuteBlinkUntil = 0; // 2-second eye blink overlay every minute
+long pomodoroMinuteLastChecked = 25;
 
 uint32_t getPomodoroRemainingSeconds(unsigned long now) {
   if (pomodoroCompleted) return 0;
@@ -343,48 +368,79 @@ void updateApplicationState(unsigned long now = 0) {
 
     // ── 3. POMODORO TIMER SCREEN ────────────────────────────
     case STATE_POMODORO:
-      if (activeGesture == GESTURE_TAPS) {
-        if (activeTapCount == 1) {
-          // 1 Tap: START / PAUSE / RESUME
-          if (pomodoroRunning) {
-            pomodoroAccumulatedMs += (now - pomodoroRunStartedAt);
-            pomodoroRunning = false;
+      // If 1-minute completion eye animation is showing, any interaction dismisses it
+      if (now < pomodoroMinuteBlinkUntil) {
+        pomodoroMinuteBlinkUntil = 0;
+      }
+
+      {
+        bool isPomoReset = (!pomodoroRunning && pomodoroAccumulatedMs == 0);
+
+        if (activeGesture == GESTURE_TAPS) {
+          if (isPomoReset) {
+            // When RESET:
+            if (activeTapCount == 1) {
+              // 1 Tap: Change timing
+              currentOptionIndex = (currentOptionIndex + 1) % 5;
+              pomodoroDurationSec = (long)pomodoroOptions[currentOptionIndex] * 60;
+              pomodoroMinuteLastChecked = pomodoroDurationSec / 60;
+              char durToast[16];
+              snprintf(durToast, sizeof(durToast), "%d MIN TIMER", pomodoroOptions[currentOptionIndex]);
+              showToast(durToast, 1200);
+              beepClick(20);
+            } else if (activeTapCount == 2) {
+              // 2 Taps: START
+              pomodoroRunning = true;
+              pomodoroRunStartedAt = now;
+              pomodoroCompleted = false;
+              pomodoroMinuteLastChecked = pomodoroDurationSec / 60;
+              beepClick(20);
+            } else if (activeTapCount >= 3) {
+              // 3 Taps: EXIT to Home
+              currentAppState = STATE_HOME;
+              beepClick(15);
+            }
           } else {
+            // When RUNNING or PAUSED:
+            if (activeTapCount == 1) {
+              // 1 Tap: START / STOP (Pause / Resume)
+              if (pomodoroRunning) {
+                pomodoroAccumulatedMs += (now - pomodoroRunStartedAt);
+                pomodoroRunning = false;
+              } else {
+                pomodoroRunning = true;
+                pomodoroRunStartedAt = now;
+                pomodoroCompleted = false;
+              }
+              beepClick(15);
+            } else if (activeTapCount == 2) {
+              // 2 Taps: RESET
+              pomodoroRunning = false;
+              pomodoroAccumulatedMs = 0;
+              pomodoroCompleted = false;
+              pomodoroMinuteLastChecked = pomodoroDurationSec / 60;
+              showToast("RESET", 1000);
+              beepClick(25);
+            } else if (activeTapCount >= 3) {
+              // 3 Taps: EXIT to Home
+              currentAppState = STATE_HOME;
+              beepClick(15);
+            }
+          }
+        } else if (activeGesture == GESTURE_LONG_PRESS) {
+          if (isPomoReset) {
+            // Long Press when reset: START
             pomodoroRunning = true;
             pomodoroRunStartedAt = now;
             pomodoroCompleted = false;
+            pomodoroMinuteLastChecked = pomodoroDurationSec / 60;
+            beepClick(20);
+          } else {
+            // Long Press when running/paused: EXIT to Home
+            currentAppState = STATE_HOME;
+            beepClick(15);
           }
-          beepClick(15);
-        } else if (activeTapCount == 2) {
-          // 2 Taps: RESET
-          pomodoroRunning = false;
-          pomodoroAccumulatedMs = 0;
-          pomodoroCompleted = false;
-          beepClick(25);
-        } else if (activeTapCount == 3) {
-          // 3 Taps: CYCLE DURATION
-          pomodoroRunning = false;
-          pomodoroAccumulatedMs = 0;
-          pomodoroCompleted = false;
-          currentOptionIndex = (currentOptionIndex + 1) % 5;
-          pomodoroDurationSec = (long)pomodoroOptions[currentOptionIndex] * 60;
-          char durToast[16];
-          snprintf(durToast, sizeof(durToast), "%d MIN TIMER", pomodoroOptions[currentOptionIndex]);
-          showToast(durToast, 1200);
-          beepClick(20);
-        } else if (activeTapCount == 4) {
-          // 4 Taps: Quick-switch to Stopwatch
-          currentAppState = STATE_STOPWATCH;
-          beepClick(15);
-        } else if (activeTapCount >= 5) {
-          // 5+ Taps: Direct Return to Home
-          currentAppState = STATE_HOME;
-          beepClick(15);
         }
-      } else if (activeGesture == GESTURE_LONG_PRESS) {
-        // Long Press: Return to Menu
-        currentAppState = STATE_MENU;
-        beepClick(15);
       }
       break;
 
@@ -392,7 +448,7 @@ void updateApplicationState(unsigned long now = 0) {
     case STATE_STOPWATCH:
       if (activeGesture == GESTURE_TAPS) {
         if (activeTapCount == 1) {
-          // 1 Tap: START / PAUSE / RESUME
+          // 1 Tap: START / STOP
           if (stopwatchRunning) {
             stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
             stopwatchRunning = false;
@@ -407,18 +463,10 @@ void updateApplicationState(unsigned long now = 0) {
           stopwatchRunning = false;
           stopwatchAccumulatedMs = 0;
           saveStopwatch();
+          showToast("RESET", 1000);
           beepClick(25);
-        } else if (activeTapCount == 3) {
-          // 3 Taps: Quick-switch to Pomodoro
-          if (stopwatchRunning) {
-            stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-            stopwatchRunning = false;
-            saveStopwatch();
-          }
-          currentAppState = STATE_POMODORO;
-          beepClick(15);
-        } else if (activeTapCount >= 4) {
-          // 4+ Taps: Direct Return to Home
+        } else if (activeTapCount >= 3) {
+          // 3 Taps: EXIT to Home
           if (stopwatchRunning) {
             stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
             stopwatchRunning = false;
@@ -428,13 +476,13 @@ void updateApplicationState(unsigned long now = 0) {
           beepClick(15);
         }
       } else if (activeGesture == GESTURE_LONG_PRESS) {
-        // Long Press: Return to Menu
+        // Long Press: EXIT to Home
         if (stopwatchRunning) {
           stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
           stopwatchRunning = false;
           saveStopwatch();
         }
-        currentAppState = STATE_MENU;
+        currentAppState = STATE_HOME;
         beepClick(15);
       }
       break;
@@ -492,12 +540,23 @@ void updateTimer(unsigned long now = 0) {
     pomodoroAccumulatedMs = 0;
     pomodoroCompleted = false;
     lastWarningSec = 0;
-  } else if (rem <= 5) {
+    pomodoroMinuteLastChecked = pomodoroDurationSec / 60;
+  } else {
+    // Check 1-minute completion during countdown
+    long currentMinute = rem / 60;
+    if (rem > 0 && currentMinute < pomodoroMinuteLastChecked) {
+      pomodoroMinuteLastChecked = currentMinute;
+      pomodoroMinuteBlinkUntil = now + 2000; // 2 seconds robotic blinking eye!
+      beepClick(12);
+    }
+
     // 5-second countdown warning beeps at seconds 5, 4, 3, 2, 1
-    if (lastWarningSec != rem) {
-      lastWarningSec = rem;
-      int pitch = map(rem, 5, 1, 800, 400);
-      beepAlarmPulse(pitch);
+    if (rem <= 5) {
+      if (lastWarningSec != rem) {
+        lastWarningSec = rem;
+        int pitch = map(rem, 5, 1, 800, 400);
+        beepAlarmPulse(pitch);
+      }
     }
   }
 }
@@ -536,63 +595,66 @@ volatile bool netTaskBusy       = false;
 portMUX_TYPE bleTimeMux = portMUX_INITIALIZER_UNLOCKED;
 volatile int64_t pendingBleEpoch = 0;
 
+static const char* BLE_WIFI_CHAR_UUID    = "a7e10003-8f5d-4b4a-9d42-4e8b7a0c0001";
+
 void networkWorkerTask(void* parameter) {
   for (;;) {
     if (netSyncRequested) {
       netSyncRequested = false;
       netTaskBusy = true;
 
-      const char* ssid = DESKBUDDY_WIFI_SSID;
-      const char* pass = DESKBUDDY_WIFI_PASSWORD;
+      const char* ssid = (strlen(configuredSsid) > 0) ? configuredSsid : DESKBUDDY_WIFI_SSID;
+      const char* pass = (strlen(configuredPass) > 0) ? configuredPass : DESKBUDDY_WIFI_PASSWORD;
 
       if (strlen(ssid) > 0) {
-        Serial.println("[NET] Asynchronous Wi-Fi connecting...");
+        Serial.printf("[NET] Connecting to Wi-Fi '%s'...\n", ssid);
         WiFi.mode(WIFI_STA);
-        WiFi.setTxPower(WIFI_POWER_8_5dBm);
         WiFi.begin(ssid, pass);
 
         unsigned long startConnect = millis();
-        while (WiFi.status() != WL_CONNECTED && (millis() - startConnect < 8000)) {
-          vTaskDelay(pdMS_TO_TICKS(100));
+        while (WiFi.status() != WL_CONNECTED && (millis() - startConnect < 12000)) {
+          vTaskDelay(pdMS_TO_TICKS(150));
         }
 
         if (WiFi.status() == WL_CONNECTED) {
-          Serial.println("[NET] Connected. Synchronizing NTP (IST)...");
-          sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
+          Serial.print("[NET] Connected! IP: ");
+          Serial.println(WiFi.localIP());
+          Serial.println("[NET] Synchronizing NTP (IST UTC+05:30)...");
           configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
 
           unsigned long startNtp = millis();
           struct tm timeinfo = {};
           bool success = false;
 
-          while (millis() - startNtp < 5000) {
-            if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED &&
-                getLocalTime(&timeinfo, 100) &&
-                timeinfo.tm_year >= (2024 - 1900)) {
+          while (millis() - startNtp < 10000) {
+            if (getLocalTime(&timeinfo, 200) && timeinfo.tm_year >= (2024 - 1900)) {
               success = true;
               break;
             }
-            vTaskDelay(pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(200));
           }
 
           if (success) {
             clockSynchronized = true;
             showToast("✓ TIME SYNCED", 2000);
-            Serial.println("[NET] Time successfully synchronized.");
+            Serial.printf("[NET] Time successfully synced: %02d:%02d:%02d\n",
+                          timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
           } else {
             showToast("! NTP TIMEOUT", 2000);
             Serial.println("[NET] NTP sync timed out.");
           }
         } else {
           showToast("! WIFI FAILED", 2000);
-          Serial.println("[NET] Wi-Fi connection failed.");
+          Serial.println("[NET] Wi-Fi connection failed. Check SSID/password or 2.4 GHz signal.");
         }
 
         // Always power off Wi-Fi modem immediately after sync to save power
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
       } else {
-        showToast("! NO WIFI SSID", 2000);
+        showToast("! NO WIFI SET", 2000);
+        Serial.println("[NET] No Wi-Fi SSID configured.");
+        Serial.println("[NET] Use 'WIFI:ssid,password' in USB Serial or write to BLE characteristic a7e10003.");
       }
 
       netTaskBusy = false;
@@ -624,6 +686,25 @@ class DeskBuddyTimeCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+class DeskBuddyWifiCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* characteristic) override {
+    std::string raw = characteristic->getValue();
+    if (raw.empty()) return;
+    size_t comma = raw.find(',');
+    if (comma != std::string::npos) {
+      std::string s = raw.substr(0, comma);
+      std::string p = raw.substr(comma + 1);
+      strncpy(configuredSsid, s.c_str(), sizeof(configuredSsid) - 1);
+      strncpy(configuredPass, p.c_str(), sizeof(configuredPass) - 1);
+      settings.putString("wifi_ssid", configuredSsid);
+      settings.putString("wifi_pass", configuredPass);
+      showToast("WIFI SAVED", 1500);
+      Serial.printf("[BLE] Saved Wi-Fi SSID '%s'. Connecting...\n", configuredSsid);
+      triggerNetworkSync();
+    }
+  }
+};
+
 class DeskBuddyServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer* pServer) override {
     NimBLEDevice::startAdvertising(); // Auto-restart advertising
@@ -636,9 +717,15 @@ void startBleService() {
   server->setCallbacks(new DeskBuddyServerCallbacks());
 
   NimBLEService* service = server->createService(BLE_TIME_SERVICE_UUID);
+  
   NimBLECharacteristic* timeChar = service->createCharacteristic(
     BLE_TIME_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   timeChar->setCallbacks(new DeskBuddyTimeCallbacks());
+
+  NimBLECharacteristic* wifiChar = service->createCharacteristic(
+    BLE_WIFI_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  wifiChar->setCallbacks(new DeskBuddyWifiCallbacks());
+
   service->start();
 
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
@@ -647,10 +734,13 @@ void startBleService() {
   NimBLEDevice::startAdvertising();
 }
 
+static char serialCmdBuf[96];
+static uint8_t serialCmdIdx = 0;
+
 void handleTimeSync(unsigned long now = 0) {
   if (now == 0) now = millis();
 
-  // Process pending BLE epoch synchronization
+  // 1. Process pending BLE epoch synchronization
   int64_t bleEpoch = 0;
   portENTER_CRITICAL(&bleTimeMux);
   if (pendingBleEpoch > 0) {
@@ -665,6 +755,59 @@ void handleTimeSync(unsigned long now = 0) {
     clockSynchronized = true;
     showToast("✓ BLE SYNCED", 2000);
     beepClick(25);
+    Serial.printf("[BLE] Time synchronized to epoch %lld\n", (long long)bleEpoch);
+  }
+
+  // 2. Process USB CDC Serial Commands
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (serialCmdIdx > 0) {
+        serialCmdBuf[serialCmdIdx] = '\0';
+        if (strncmp(serialCmdBuf, "WIFI:", 5) == 0) {
+          char* comma = strchr(serialCmdBuf + 5, ',');
+          if (comma) {
+            *comma = '\0';
+            strncpy(configuredSsid, serialCmdBuf + 5, sizeof(configuredSsid) - 1);
+            strncpy(configuredPass, comma + 1, sizeof(configuredPass) - 1);
+            settings.putString("wifi_ssid", configuredSsid);
+            settings.putString("wifi_pass", configuredPass);
+            Serial.printf("[SERIAL] Saved Wi-Fi SSID '%s'. Triggering sync...\n", configuredSsid);
+            showToast("WIFI SAVED", 1500);
+            triggerNetworkSync();
+          } else {
+            Serial.println("[SERIAL] Format error. Use: WIFI:ssid,password");
+          }
+        } else if (strncmp(serialCmdBuf, "TIME:", 5) == 0 || isdigit(serialCmdBuf[0])) {
+          const char* numStr = (strncmp(serialCmdBuf, "TIME:", 5) == 0) ? serialCmdBuf + 5 : serialCmdBuf;
+          char* end = nullptr;
+          long long epoch = strtoll(numStr, &end, 10);
+          if (epoch > 100000000000LL) epoch /= 1000;
+          if (epoch >= 1700000000LL && epoch <= 4102444800LL) {
+            struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
+            settimeofday(&tv, NULL);
+            clockSynchronized = true;
+            showToast("✓ TIME SYNCED", 2000);
+            beepClick(25);
+            Serial.printf("[SERIAL] Time synced to Unix epoch %lld\n", epoch);
+          } else {
+            Serial.println("[SERIAL] Invalid epoch timestamp.");
+          }
+        } else if (strcasecmp(serialCmdBuf, "SYNC") == 0) {
+          triggerNetworkSync();
+          showToast("SYNCING TIME...");
+          Serial.println("[SERIAL] Triggered Wi-Fi and NTP sync.");
+        } else if (strcasecmp(serialCmdBuf, "STATUS") == 0) {
+          struct tm ti = {};
+          getLocalTime(&ti, 50);
+          Serial.printf("[STATUS] SSID: '%s', Clock Synced: %d, Time: %02d:%02d:%02d\n",
+                        configuredSsid, clockSynchronized, ti.tm_hour, ti.tm_min, ti.tm_sec);
+        }
+        serialCmdIdx = 0;
+      }
+    } else if (serialCmdIdx < sizeof(serialCmdBuf) - 1) {
+      serialCmdBuf[serialCmdIdx++] = c;
+    }
   }
 }
 
@@ -857,31 +1000,93 @@ void renderMenu() {
   u8g2.drawStr(4, 61, "1:NEXT   2/HOLD:SELECT   H:BACK");
 }
 
+// ── Helper: Pomodoro 1-Minute Completion Robotic Blinking Eyes Overlay ──
+void renderRoboticMinuteEyes(unsigned long now, uint32_t remainingSec) {
+  // Eye Animation Calculation
+  unsigned long animElapsed = now - (pomodoroMinuteBlinkUntil - 2000);
+  float closure = 0.0f;
+  if (animElapsed < 250) closure = (float)animElapsed / 250.0f;
+  else if (animElapsed < 500) closure = 1.0f;
+  else if (animElapsed < 750) closure = 1.0f - ((float)(animElapsed - 500) / 250.0f);
+  else if (animElapsed < 1250) closure = 0.0f;
+  else if (animElapsed < 1500) closure = (float)(animElapsed - 1250) / 250.0f;
+  else if (animElapsed < 1750) closure = 1.0f;
+  else closure = 1.0f - ((float)(animElapsed - 1750) / 250.0f);
+
+  int gazeOffset = (int)(sinf(now * 0.005f) * 4.0f);
+  int eyeHeight  = (int)((1.0f - closure) * 24.0f);
+  if (eyeHeight < 2) eyeHeight = 2;
+
+  // Header banner: Left = POMO, Center = Clock, Right = remaining countdown
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+  u8g2.drawStr(2, 9, "POMODORO FOCUS");
+
+  char clockBuf[12];
+  getCompactClockStr(clockBuf, sizeof(clockBuf));
+  u8g2.drawStr(70, 9, clockBuf);
+
+  char remBuf[10];
+  snprintf(remBuf, sizeof(remBuf), "%02lu:%02lu", remainingSec / 60UL, remainingSec % 60UL);
+  int remW = u8g2.getStrWidth(remBuf);
+  u8g2.drawStr(126 - remW, 9, remBuf);
+  u8g2.drawLine(0, 11, 128, 11);
+
+  // Left & Right Eyes
+  u8g2.drawRBox(36 - 15, 33 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
+  u8g2.drawRBox(92 - 15, 33 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
+
+  // Pupils (visible when open)
+  if (closure < 0.4f) {
+    u8g2.setDrawColor(0);
+    u8g2.drawRBox(36 - 3 + gazeOffset, 31, 6, 8, 1);
+    u8g2.drawRBox(92 - 3 + gazeOffset, 31, 6, 8, 1);
+    u8g2.setDrawColor(1);
+  }
+
+  // Footer
+  u8g2.drawLine(0, 52, 128, 52);
+  u8g2.drawStr(20, 61, "GREAT WORK! KEEP GOING");
+}
+
 // ── Screen: Pomodoro Timer ───────────────────────────────────
 void renderPomodoro(unsigned long now) {
   uint32_t remainingSec = getPomodoroRemainingSeconds(now);
 
-  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
-  char titleBuf[24];
-  snprintf(titleBuf, sizeof(titleBuf), "TIMER %dM", pomodoroOptions[currentOptionIndex]);
-  u8g2.drawStr(4, 9, titleBuf);
+  // If 1-minute completion eye animation is active, render robotic blinking eyes!
+  if (pomodoroRunning && now < pomodoroMinuteBlinkUntil) {
+    renderRoboticMinuteEyes(now, remainingSec);
+    return;
+  }
 
-  const char* status = (now < pomodoroCompleteUntil) ? "FINISHED!" :
-                       (pomodoroRunning ? "RUNNING" :
-                       (pomodoroAccumulatedMs > 0 ? "PAUSED" : "READY"));
-  u8g2.drawStr(82, 9, status);
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+
+  // Header: Left = Duration (e.g. 25M), Center = Clock (e.g. 4:15P), Right = Status
+  char titleBuf[16];
+  snprintf(titleBuf, sizeof(titleBuf), "%dM", pomodoroOptions[currentOptionIndex]);
+  u8g2.drawStr(2, 9, titleBuf);
+
+  char clockBuf[12];
+  getCompactClockStr(clockBuf, sizeof(clockBuf));
+  int clockW = u8g2.getStrWidth(clockBuf);
+  u8g2.drawStr((128 - clockW) / 2, 9, clockBuf);
+
+  const char* status = (now < pomodoroCompleteUntil) ? "FIN!" :
+                       (pomodoroRunning ? "RUN" :
+                       (pomodoroAccumulatedMs > 0 ? "PAUS" : "READY"));
+  int statusW = u8g2.getStrWidth(status);
+  u8g2.drawStr(126 - statusW, 9, status);
   u8g2.drawLine(0, 12, 128, 12);
 
   // Large Centered Digits MM:SS
   char timeBuf[12];
   snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu", remainingSec / 60UL, remainingSec % 60UL);
-  u8g2.setFont(u8g2_font_logisoso28_tn);
+  u8g2.setFont(u8g2_font_logisoso26_tn);
   int w = u8g2.getStrWidth(timeBuf);
 
   // Flashing inverted block on last 5 seconds
   if (remainingSec <= 5 && remainingSec > 0 && pomodoroRunning && ((now / 250) % 2 == 0)) {
     u8g2.setDrawColor(1);
-    u8g2.drawRBox(10, 16, 108, 34, 3);
+    u8g2.drawRBox((128 - w) / 2 - 4, 16, w + 8, 34, 3);
     u8g2.setDrawColor(0);
   }
   u8g2.drawStr((128 - w) / 2, 47, timeBuf);
@@ -890,11 +1095,14 @@ void renderPomodoro(unsigned long now) {
   // Footer Controls
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawLine(0, 52, 128, 52);
-  const char* toggleCmd = pomodoroRunning ? "1:PAUSE" : (pomodoroAccumulatedMs > 0 ? "1:RESUME" : "1:START");
-  char footBuf[36];
-  snprintf(footBuf, sizeof(footBuf), "%s 2:RST 3:DUR", toggleCmd);
-  u8g2.drawStr(2, 61, footBuf);
-  u8g2.drawStr(96, 61, "H:MENU");
+  if (pomodoroRunning) {
+    u8g2.drawStr(2, 61, "1:STOP   2:RESET   3:EXIT");
+  } else if (pomodoroAccumulatedMs > 0) {
+    u8g2.drawStr(2, 61, "1:START  2:RESET   3:EXIT");
+  } else {
+    // Reset state: 1 tap to change timing!
+    u8g2.drawStr(2, 61, "1:CHG TIME  2/H:START  3:EXIT");
+  }
 }
 
 // ── Screen: Stopwatch ────────────────────────────────────────
@@ -906,10 +1114,17 @@ void renderStopwatch(unsigned long now) {
   uint64_t seconds = totalSec % 60ULL;
 
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
-  u8g2.drawStr(4, 9, "STOPWATCH");
-  const char* status = stopwatchRunning ? "RUNNING" :
-                       (stopwatchAccumulatedMs > 0 ? "PAUSED" : "READY");
-  u8g2.drawStr(82, 9, status);
+  u8g2.drawStr(2, 9, "STOPWATCH");
+
+  char clockBuf[12];
+  getCompactClockStr(clockBuf, sizeof(clockBuf));
+  int clockW = u8g2.getStrWidth(clockBuf);
+  u8g2.drawStr((128 - clockW) / 2, 9, clockBuf);
+
+  const char* status = stopwatchRunning ? "RUN" :
+                       (stopwatchAccumulatedMs > 0 ? "PAUS" : "READY");
+  int statusW = u8g2.getStrWidth(status);
+  u8g2.drawStr(126 - statusW, 9, status);
   u8g2.drawLine(0, 12, 128, 12);
 
   // Large Centered Digits
@@ -931,14 +1146,10 @@ void renderStopwatch(unsigned long now) {
     u8g2.drawStr((128 - w) / 2, 46, watchBuf);
   }
 
-  // Footer Controls
+  // Footer Controls: Exactly 3 options as requested!
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawLine(0, 52, 128, 52);
-  const char* toggleCmd = stopwatchRunning ? "1:PAUSE" : (stopwatchAccumulatedMs > 0 ? "1:RESUME" : "1:START");
-  char footBuf[36];
-  snprintf(footBuf, sizeof(footBuf), "%s 2:RST 3:POMO", toggleCmd);
-  u8g2.drawStr(2, 61, footBuf);
-  u8g2.drawStr(96, 61, "H:MENU");
+  u8g2.drawStr(2, 61, "1:START/STOP  2:RESET  3:EXIT");
 }
 
 // ── Screen: Toast Notification Overlay ───────────────────────
@@ -1002,7 +1213,18 @@ void setup() {
   clockFormat = settings.getInt("clk_fmt", 1);
   stopwatchAccumulatedMs = settings.getULong64("sw_ms", 0);
 
-  // Start BLE time sync service
+  // Load configured Wi-Fi from NVS or fallback to macro
+  String storedSsid = settings.getString("wifi_ssid", "");
+  String storedPass = settings.getString("wifi_pass", "");
+  if (storedSsid.length() > 0) {
+    strncpy(configuredSsid, storedSsid.c_str(), sizeof(configuredSsid) - 1);
+    strncpy(configuredPass, storedPass.c_str(), sizeof(configuredPass) - 1);
+  } else {
+    strncpy(configuredSsid, DESKBUDDY_WIFI_SSID, sizeof(configuredSsid) - 1);
+    strncpy(configuredPass, DESKBUDDY_WIFI_PASSWORD, sizeof(configuredPass) - 1);
+  }
+
+  // Start BLE time & Wi-Fi sync service
   startBleService();
 
   // Create background network worker task for async Wi-Fi & NTP
@@ -1016,8 +1238,10 @@ void setup() {
   );
 
   // Initial network sync at boot if Wi-Fi SSID is configured
-  if (strlen(DESKBUDDY_WIFI_SSID) > 0) {
+  if (strlen(configuredSsid) > 0) {
     triggerNetworkSync();
+  } else {
+    Serial.println("[SYSTEM] No Wi-Fi configured yet. Send 'WIFI:SSID,PASSWORD' in Serial to connect.");
   }
 
   beepClick(15);

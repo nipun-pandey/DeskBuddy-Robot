@@ -34,20 +34,25 @@ The SH1106 128×64 OLED display presents an uncluttered, modern interface:
   - `3 Taps`: Return to Home.
 - **Pomodoro Timer Screen:**
   - Extra-large countdown digits (`MM:SS`).
-  - Small header with duration setting (`POMO 25M`) and status (`RUNNING` / `PAUSED` / `READY`).
-  - `1 Tap`: Start / Pause / Resume.
-  - `2 Taps`: Reset to full duration.
-  - `3 Taps`: Cycle duration (`50`, `25`, `10`, `5`, `1` min).
-  - `4 Taps`: Switch directly to Stopwatch.
-  - `Hold (>0.8s)`: Return to Menu.
+  - Header displays duration (`25M`), **live clock** (`04:15P`), and status (`RUN` / `PAUS` / `READY`).
+  - **When Reset:**
+    - `1 Tap`: Cycle duration (`50`, `25`, `10`, `5`, `1` min).
+    - `2 Taps` or `Hold`: Start countdown.
+    - `3 Taps`: Exit to Home screen.
+  - **When Running / Paused:**
+    - `1 Tap`: Start / Stop (Pause / Resume).
+    - `2 Taps`: Reset to full duration.
+    - `3 Taps`: Exit to Home screen.
+  - **Every 1 minute completed:** Displays robotic blinking eyes animation for 2 seconds to encourage focus, then automatically returns to the countdown.
   - 5-second countdown warning beeps at seconds 5, 4, 3, 2, 1.
   - On finish: completion alarm and auto-reset back to chosen duration.
 - **Stopwatch Screen:**
   - Extra-large elapsed digits (`MM:SS.t` with live tenths; switches to `HH:MM:SS` after 1 hour).
-  - `1 Tap`: Start / Pause / Resume.
-  - `2 Taps`: Reset to 00:00.
-  - `3 Taps`: Switch directly to Pomodoro.
-  - `Hold (>0.8s)`: Return to Menu.
+  - Header displays live clock and status.
+  - **Streamlined 3-Tap Controls:**
+    - `1 Tap`: Start / Stop (Pause / Resume).
+    - `2 Taps`: Reset to `00:00.0`.
+    - `3 Taps`: Exit to Home screen.
   - Elapsed time is measured using monotonic timestamps (`millis()`) and saved in NVS across reboots.
 
 ---
@@ -65,14 +70,27 @@ The SH1106 128×64 OLED display presents an uncluttered, modern interface:
 
 ---
 
-## 4. Setting Time via Bluetooth (BLE)
+## 4. Wi-Fi & Time Configuration
 
+DeskBuddy provides multiple flexible ways to set Wi-Fi credentials and synchronize time without needing to edit source code:
+
+### A. USB Serial Commands (Instant)
+Connect the ESP32 to your computer via USB, open a serial terminal at 115200 baud, and send:
+- `WIFI:YourSSID,YourPassword` — Saves to NVS flash storage and connects immediately to sync NTP time.
+- `TIME:<unix_epoch>` (e.g. `TIME:1793141137`) — Sets the clock immediately to the exact second.
+- `SYNC` — Manually triggers Wi-Fi connection and NTP time sync.
+- `STATUS` — Prints Wi-Fi SSID, connection state, and current RTC time.
+
+### B. Bluetooth Low Energy (BLE)
 DeskBuddy advertises as **`DeskBuddy`** using NimBLE:
-1. Connect via any BLE utility (such as LightBlue or nRF Connect).
-2. Service UUID: `a7e10001-8f5d-4b4a-9d42-4e8b7a0c0001`.
-3. Characteristic UUID: `a7e10002-8f5d-4b4a-9d42-4e8b7a0c0001`.
-4. Write the current Unix UTC epoch timestamp (in seconds or 13-digit milliseconds).
-5. DeskBuddy sets its RTC, applies the IST offset (+05:30), beeps for confirmation, and marks the clock as synchronized.
+1. Connect via any BLE utility (e.g., LightBlue or nRF Connect).
+2. Service UUID: `a7e10001-8f5d-4b4a-9d42-4e8b7a0c0001`
+3. Characteristics:
+   - **Time UUID** (`a7e10002-...`): Write current Unix UTC epoch timestamp.
+   - **Wi-Fi UUID** (`a7e10003-...`): Write `YourSSID,YourPassword` to configure and connect.
+
+### C. Touch Gesture (5 Taps)
+- Tap **5 times** on the touch sensor / button from the Home screen to trigger background Wi-Fi and NTP synchronization.
 
 ---
 
