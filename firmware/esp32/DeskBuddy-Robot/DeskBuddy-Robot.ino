@@ -624,18 +624,24 @@ void networkWorkerTask(void* parameter) {
 
       if (strlen(ssid) > 0) {
         Serial.printf("[NET] Connecting to Wi-Fi '%s'...\n", ssid);
+        WiFi.persistent(false);
         WiFi.mode(WIFI_STA);
+        WiFi.setTxPower(WIFI_POWER_8_5dBm); // Prevent RF saturation on ESP32-C3
+        WiFi.setMinSecurity(WIFI_AUTH_OPEN);
 
-        // Configure PMF and WPA2/WPA3 compatibility for modern smartphone hotspots (Samsung S23, etc.)
+        // Initialize STA credentials without auto-connecting immediately
+        WiFi.begin(ssid, pass, 0, NULL, false);
+
+        // Explicitly enable PMF (Protected Management Frames) for modern Android hotspots (Samsung S23, etc.)
         wifi_config_t conf;
-        memset(&conf, 0, sizeof(conf));
-        strncpy((char*)conf.sta.ssid, ssid, sizeof(conf.sta.ssid) - 1);
-        strncpy((char*)conf.sta.password, pass, sizeof(conf.sta.password) - 1);
-        conf.sta.pmf_cfg.capable = true;
-        conf.sta.pmf_cfg.required = false;
-        esp_wifi_set_config(WIFI_IF_STA, &conf);
+        if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
+          conf.sta.pmf_cfg.capable = true;
+          conf.sta.pmf_cfg.required = false;
+          esp_wifi_set_config(WIFI_IF_STA, &conf);
+        }
 
-        WiFi.begin(ssid, pass);
+        // Now initiate connection with active PMF negotiation
+        esp_wifi_connect();
 
         unsigned long startConnect = millis();
         while (WiFi.status() != WL_CONNECTED && (millis() - startConnect < 15000)) {
@@ -1357,6 +1363,18 @@ void setup() {
     strncpy(configuredSsid, DESKBUDDY_WIFI_SSID, sizeof(configuredSsid) - 1);
     strncpy(configuredPass, DESKBUDDY_WIFI_PASSWORD, sizeof(configuredPass) - 1);
   }
+
+  // Register Wi-Fi event handler for detailed diagnostics
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      uint8_t reason = info.wifi_sta_disconnected.reason;
+      Serial.printf("[WIFI-EVENT] STA Disconnected. Reason code: %u\n", reason);
+    } else if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+      Serial.println("[WIFI-EVENT] STA Connected to Access Point!");
+    } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      Serial.printf("[WIFI-EVENT] Got IP: %s\n", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+    }
+  });
 
   // Start BLE time & Wi-Fi sync service
   startBleService();
