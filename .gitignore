@@ -5,4 +5,5 @@ build/
 *.tmp
 .vscode/
 firmware/esp32/main/secrets.h
+firmware/esp32/DeskBuddy-Robot/secrets.h
 .pio/

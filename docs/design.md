@@ -1,13 +1,49 @@
-# DeskBuddy Design
+# DeskBuddy Robot Design
 
-DeskBuddy is a local-first companion robot. Its primary interaction loop—display, touch gestures, timer, animations, and indoor sensor readings—works without network access.
+DeskBuddy Robot is designed as a local-first, highly responsive desktop companion. Its design decouples visual interaction and touch input from network and sensor latency.
 
-## Modules
+## Architecture
 
-1. **Interaction** — GPIO 7 touch/button input is interpreted as taps and long presses.
-2. **Display** — an SH1106 128×64 I2C OLED presents the clock, sensor dashboard, and animations.
-3. **Sensors** — a DHT11 supplies indoor temperature and humidity, sampled every two seconds.
-4. **Sound** — a passive buzzer provides gesture and timer feedback.
-5. **Network** — Wi-Fi connects only for NTP and weather. Weather is fetched at boot and then refreshed every 30 minutes; Wi-Fi is turned off between refreshes.
+```text
+┌────────────────────────────────────────────────────────┐
+│             UI & Interaction Loop (Core 0)             │
+│  - 60 FPS SH1106 OLED Display Pipeline                 │
+│  - Debounced Touch Gesture State Machine               │
+│  - Non-blocking Microsecond Tone Audio Engine          │
+│  - Pomodoro Timer & Millisecond Persistent Stopwatch   │
+│  - 10+ Expressive Animations & Compliments             │
+└──────────────────────────┬─────────────────────────────┘
+                           │ Shared Safe State
+┌──────────────────────────┴─────────────────────────────┐
+│          Background Asynchronous Workers (RTOS)        │
+│  - FreeRTOS Background Network Task (Wi-Fi/NTP/Weather)│
+│  - NimBLE BLE Time Synchronization Service             │
+│  - Non-blocking DHT11 Environmental Sampler            │
+└────────────────────────────────────────────────────────┘
+```
 
-The firmware is a state machine with HOME, animation, timer, petting, compliment, and secret-gift states. Long-running user interactions remain independent of periodic sensor and network updates.
+## Functional Modules
+
+1. **Interaction & State Machine:**
+   - Single GPIO (GPIO 7) input filtered through 25ms debouncing.
+   - Evaluates multi-taps (1 to 8 taps) with a 500ms settlement window.
+   - Disambiguates between normal taps, long presses (>1.0s), and the secret multi-tap hold gesture (3 taps + hold) without false releases.
+
+2. **Display Pipeline:**
+   - Full-frame buffer rendering (`U8G2_SH1106_128X64_NONAME_F_HW_I2C`) over 400 kHz I2C.
+   - Paced frame limiter (`FRAME_INTERVAL_MS = 16`) providing steady, tear-free 60 FPS animation.
+   - Zero dynamic heap allocation during frame rendering.
+
+3. **Audio Subsystem:**
+   - Square wave tone generation on GPIO 5 passive buzzer.
+   - Rising-pitch audio feedback for sequential taps.
+   - Multi-burst frequency sweep for Pomodoro completion alarm.
+
+4. **Bluetooth Low Energy (BLE):**
+   - Advertises service `a7e10001-8f5d-4b4a-9d42-4e8b7a0c0001`.
+   - Accepts Unix epoch strings via characteristic `a7e10002-8f5d-4b4a-9d42-4e8b7a0c0001`.
+   - Implements `NimBLEServerCallbacks` with automatic advertising restart on disconnection.
+
+5. **Power & Memory Efficiency:**
+   - Low memory footprint: <9% RAM utilization and <48% Flash utilization on ESP32-C3.
+   - Wi-Fi radio powered off between periodic 30-minute sync windows.
