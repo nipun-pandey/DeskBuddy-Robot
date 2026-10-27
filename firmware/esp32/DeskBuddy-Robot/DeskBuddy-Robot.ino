@@ -1,16 +1,23 @@
 // ============================================================
-//  DeskBuddy Robot — Minimal 5-Gesture Companion Firmware
-//  Gestures:
-//  1 Tap — Love Animation ❤️ (heart eyes + floating hearts)
-//  2 Taps — Timer & Stopwatch ⏱️ (minimal menu + large digits)
-//  3 Taps — Crazy Face 🤪 (star eyes + screen shake)
-//  4 Taps — Clock Format 🕒 (12H, 12H+sec, 24H, 24H+sec — persisted)
-//  5 Taps — Time Synchronization 🔄 (background Wi-Fi + NTP sync)
+//  DeskBuddy Robot — Polished Minimal Desktop Companion
+//  ESP32-C3 DevKitM-1 + SH1106 128x64 OLED
+//  
+//  Architecture:
+//  - handleInput()           : Debounced edge detection & long press
+//  - processGestures()       : Settle-window tap counting FSM
+//  - updateApplicationState(): Navigation and mode state machine
+//  - updateAnimations()      : Non-blocking animated eyes & special faces
+//  - updateTimer()           : Monotonic timestamp Pomodoro countdown
+//  - updateStopwatch()       : Monotonic timestamp persistent stopwatch
+//  - updateClock()           : IST clock formatting & NVS persistence
+//  - handleTimeSync()        : Non-blocking background Wi-Fi & NTP sync
+//  - renderScreen()          : Crisp, flicker-free 60 FPS OLED rendering
 // ============================================================
 
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
+#include <DHT.h>
 #include <WiFi.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
@@ -26,12 +33,13 @@
 #endif
 
 // ============================================================
-//  PIN MAPPING (ESP32-C3 DevKitM-1)
+//  PIN MAPPING (ESP32-C3)
 // ============================================================
 #define SDA_PIN          8   // I2C data  → SH1106 OLED
 #define SCL_PIN          9   // I2C clock → SH1106 OLED
 #define BUZZER_PIN       5   // Passive piezo buzzer
 #define TOUCH_PIN        7   // Touch sensor / push button
+#define DHT_PIN          6   // DHT11 temperature & humidity sensor
 #define TOUCH_ACTIVE_LOW 0   // 0 = active HIGH, 1 = active LOW
 
 // BLE Configuration
@@ -41,39 +49,45 @@ static const char* BLE_TIME_CHAR_UUID    = "a7e10002-8f5d-4b4a-9d42-4e8b7a0c0001
 
 // Hardware Objects
 U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+DHT dht(DHT_PIN, DHT11);
 Preferences settings;
 
 // ============================================================
-//  STATE MACHINE
+//  APPLICATION STATES
 // ============================================================
-enum State {
-  STATE_HOME,        // Minimal Home: Animated eyes + small clock
-  STATE_LOVE,        // 1 Tap: Cute love animation (heart eyes + floating hearts)
-  STATE_TIMER_MENU,  // 2 Taps: Minimal 2-item menu (Pomodoro / Stopwatch)
-  STATE_POMODORO,    // Large digit countdown timer
-  STATE_STOPWATCH,   // Large digit millisecond stopwatch
-  STATE_CRAZY        // 3 Taps: Crazy funny face (star eyes + screen shake)
+enum AppState {
+  STATE_HOME = 0,    // Animated expressive eyes + bottom clock
+  STATE_LOVE,        // 1 Tap: Heart-eye love animation + floating hearts
+  STATE_MENU,        // 2 Taps: Minimal menu (TIMER / STOPWATCH / BACK)
+  STATE_POMODORO,    // Pomodoro countdown timer (large digits)
+  STATE_STOPWATCH,   // Persistent millisecond stopwatch (large digits)
+  STATE_CRAZY        // 3 Taps: Playful crazy face (star eyes + screen shake)
 };
 
-State currentState = STATE_HOME;
-unsigned long stateStartTime = 0;
+AppState currentAppState = STATE_HOME;
+unsigned long appStateStartTime = 0;
 
 // ============================================================
-//  CLOCK & TIMEZONE (IST UTC+05:30)
-//  clockFormat: 0=12H, 1=12H+sec (default), 2=24H, 3=24H+sec
+//  CLOCK & SETTINGS (IST UTC+05:30)
+//  0=12H, 1=12H+sec (default), 2=24H, 3=24H+sec
 // ============================================================
 int clockFormat = 1;
 bool clockSynchronized = false;
 
-// Sync status indicators (0=idle, 1=syncing, 2=success, 3=failed)
-enum SyncIndicator { SYNC_IDLE = 0, SYNC_RUNNING, SYNC_SUCCESS, SYNC_FAILED };
-SyncIndicator syncIndicator = SYNC_IDLE;
-unsigned long syncIndicatorTime = 0;
+// Toast Notification Overlay
+char toastMessage[24] = "";
+unsigned long toastEndTime = 0;
+
+void showToast(const char* msg, unsigned long durationMs = 1800) {
+  strncpy(toastMessage, msg, sizeof(toastMessage) - 1);
+  toastMessage[sizeof(toastMessage) - 1] = '\0';
+  toastEndTime = millis() + durationMs;
+}
 
 // ============================================================
 //  TIMER & STOPWATCH DATA
 // ============================================================
-int menuSelection = 0; // 0 = Pomodoro, 1 = Stopwatch
+int menuIndex = 0; // 0=TIMER, 1=STOPWATCH, 2=BACK
 
 // Pomodoro Timer (Timestamp-based)
 const int pomodoroOptions[] = {50, 25, 10, 5, 1}; // in minutes
@@ -83,6 +97,7 @@ bool pomodoroRunning        = false;
 unsigned long pomodoroRunStartedAt  = 0;
 unsigned long pomodoroAccumulatedMs = 0;
 bool pomodoroCompleted      = false;
+unsigned long pomodoroCompleteUntil = 0;
 uint32_t lastWarningSec     = 0;
 
 uint32_t getPomodoroRemainingSeconds(unsigned long now) {
@@ -111,8 +126,14 @@ void saveStopwatch() {
   settings.putULong64("sw_ms", stopwatchAccumulatedMs);
 }
 
+// DHT11 Ambient Data (Sampled non-blockingly)
+float indoorTemp = NAN;
+float indoorHum  = NAN;
+unsigned long lastSensorSample = 0;
+const unsigned long SENSOR_SAMPLE_INTERVAL = 3000;
+
 // ============================================================
-//  BUZZER (NON-BLOCKING SCHEDULE)
+//  BUZZER (NON-BLOCKING)
 // ============================================================
 void beepClick(int durationMs = 8) {
   digitalWrite(BUZZER_PIN, HIGH);
@@ -121,7 +142,7 @@ void beepClick(int durationMs = 8) {
 }
 
 void beepAlarmPulse(int pitchUs) {
-  for (int i = 0; i < 30; i++) {
+  for (int i = 0; i < 28; i++) {
     digitalWrite(BUZZER_PIN, HIGH); delayMicroseconds(pitchUs);
     digitalWrite(BUZZER_PIN, LOW);  delayMicroseconds(pitchUs);
   }
@@ -139,25 +160,374 @@ void beepTapFeedback(int tapNum) {
 }
 
 // ============================================================
-//  TOUCH & 5-GESTURE STATE MACHINE
+//  MODULE 1: handleInput() — Debounced Edge & Long-Press Detection
 // ============================================================
-unsigned long touchStartTime = 0;
-unsigned long lastTapRelease = 0;
-int tapCount = 0;
+struct InputEvent {
+  bool touching;
+  bool pressedEdge;
+  bool releasedEdge;
+  bool longPressHeld;
+  bool longPressReleased;
+};
 
-bool touchCurrentState   = LOW;
+InputEvent rawInput;
 bool touchDebouncedState = LOW;
-unsigned long touchLastDebounceTime = 0;
-const unsigned long TOUCH_DEBOUNCE_MS = 25;
+bool touchLastRawState   = LOW;
+unsigned long touchDebounceTime = 0;
+unsigned long touchPressStartTime = 0;
+bool touchLongPressActive = false;
 
-bool longPressHandled = false;
-const unsigned long LONG_PRESS_MS = 800;
-const unsigned long TAP_GAP_MS    = 420;
-const unsigned long FRAME_INTERVAL_MS = 16;
-unsigned long lastFrameAt = 0;
+const unsigned long DEBOUNCE_MS   = 25;
+const unsigned long LONG_PRESS_MS = 750;
+
+void handleInput(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  bool physicalState = (digitalRead(TOUCH_PIN) == (TOUCH_ACTIVE_LOW ? LOW : HIGH));
+  if (physicalState != touchLastRawState) {
+    touchLastRawState = physicalState;
+    touchDebounceTime = now;
+  }
+
+  bool debounced = touchDebouncedState;
+  if ((now - touchDebounceTime) >= DEBOUNCE_MS) {
+    debounced = touchLastRawState;
+  }
+
+  rawInput.pressedEdge  = (debounced && !touchDebouncedState);
+  rawInput.releasedEdge = (!debounced && touchDebouncedState);
+  touchDebouncedState   = debounced;
+  rawInput.touching     = debounced;
+
+  rawInput.longPressHeld = false;
+  rawInput.longPressReleased = false;
+
+  if (rawInput.pressedEdge) {
+    touchPressStartTime = now;
+    touchLongPressActive = false;
+  }
+
+  // Detect long press threshold reached
+  if (rawInput.touching && !touchLongPressActive && (now - touchPressStartTime >= LONG_PRESS_MS)) {
+    touchLongPressActive = true;
+    rawInput.longPressHeld = true; // One-shot trigger
+  }
+
+  // Detect release of long press (suppresses tap count)
+  if (rawInput.releasedEdge) {
+    if (touchLongPressActive) {
+      rawInput.longPressReleased = true;
+      touchLongPressActive = false;
+    }
+  }
+}
 
 // ============================================================
-//  BACKGROUND ASYNC WI-FI & NTP SYNC (FreeRTOS Task)
+//  MODULE 2: processGestures() — Settle-Window Tap Counting FSM
+// ============================================================
+enum GestureType {
+  GESTURE_NONE = 0,
+  GESTURE_TAPS,
+  GESTURE_LONG_PRESS
+};
+
+GestureType activeGesture = GESTURE_NONE;
+int activeTapCount = 0;
+
+int accumulatedTaps = 0;
+unsigned long lastTapReleaseTime = 0;
+const unsigned long TAP_GAP_MS = 380; // Settle window for multi-taps
+
+void processGestures(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  activeGesture = GESTURE_NONE;
+  activeTapCount = 0;
+
+  // Handle immediate long press
+  if (rawInput.longPressHeld) {
+    activeGesture = GESTURE_LONG_PRESS;
+    accumulatedTaps = 0; // Clear any pending tap accumulation
+    return;
+  }
+
+  // Accumulate clean tap releases (ignoring long-press releases)
+  if (rawInput.releasedEdge && !rawInput.longPressReleased) {
+    accumulatedTaps++;
+    lastTapReleaseTime = now;
+    beepTapFeedback(accumulatedTaps); // Audio click per physical tap
+  }
+
+  // Settle window timeout: Dispatch tap sequence ONLY after TAP_GAP_MS of silence
+  if (accumulatedTaps > 0 && !rawInput.touching && (now - lastTapReleaseTime >= TAP_GAP_MS)) {
+    activeGesture  = GESTURE_TAPS;
+    activeTapCount = accumulatedTaps;
+    accumulatedTaps = 0; // Reset accumulator
+  }
+}
+
+// ============================================================
+//  MODULE 3: updateApplicationState() — Mode & Navigation FSM
+// ============================================================
+void triggerNetworkSync(); // Forward declaration
+
+void updateApplicationState(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  if (activeGesture == GESTURE_NONE) return;
+
+  switch (currentAppState) {
+    // ── 1. HOME SCREEN (GLOBAL GESTURES) ────────────────────
+    case STATE_HOME:
+      if (activeGesture == GESTURE_TAPS) {
+        if (activeTapCount == 1) {
+          // 1 Tap — Love Animation
+          currentAppState = STATE_LOVE;
+          appStateStartTime = now;
+        } else if (activeTapCount == 2) {
+          // 2 Taps — Timer & Stopwatch Menu
+          currentAppState = STATE_MENU;
+          menuIndex = 0;
+          appStateStartTime = now;
+          beepClick(15);
+        } else if (activeTapCount == 3) {
+          // 3 Taps — Crazy Face
+          currentAppState = STATE_CRAZY;
+          appStateStartTime = now;
+        } else if (activeTapCount == 4) {
+          // 4 Taps — Cycle Clock Format & Persist
+          clockFormat = (clockFormat + 1) % 4;
+          settings.putInt("clk_fmt", clockFormat);
+          const char* fmtLabels[] = {"12-HOUR", "12H + SEC", "24-HOUR", "24H + SEC"};
+          showToast(fmtLabels[clockFormat]);
+          beepClick(20);
+        } else if (activeTapCount == 5) {
+          // 5 Taps — Time Synchronization
+          triggerNetworkSync();
+          showToast("SYNCING TIME...");
+          beepClick(25);
+        }
+      }
+      break;
+
+    // ── 2. MINIMAL MENU (TIMER / STOPWATCH / BACK) ──────────
+    case STATE_MENU:
+      if (activeGesture == GESTURE_TAPS) {
+        if (activeTapCount == 1) {
+          // 1 Tap: Advance menu selection
+          menuIndex = (menuIndex + 1) % 3;
+          beepClick(10);
+        } else if (activeTapCount == 2) {
+          // 2 Taps: Open selected option
+          if (menuIndex == 0) {
+            currentAppState = STATE_POMODORO;
+          } else if (menuIndex == 1) {
+            currentAppState = STATE_STOPWATCH;
+          } else {
+            currentAppState = STATE_HOME;
+          }
+          beepClick(20);
+        } else if (activeTapCount >= 3) {
+          currentAppState = STATE_HOME;
+          beepClick(15);
+        }
+      } else if (activeGesture == GESTURE_LONG_PRESS) {
+        // Long Press: Select current option or Back
+        if (menuIndex == 0) {
+          currentAppState = STATE_POMODORO;
+        } else if (menuIndex == 1) {
+          currentAppState = STATE_STOPWATCH;
+        } else {
+          currentAppState = STATE_HOME;
+        }
+        beepClick(20);
+      }
+      break;
+
+    // ── 3. POMODORO TIMER SCREEN ────────────────────────────
+    case STATE_POMODORO:
+      if (activeGesture == GESTURE_TAPS) {
+        if (activeTapCount == 1) {
+          // 1 Tap: START / PAUSE / RESUME
+          if (pomodoroRunning) {
+            pomodoroAccumulatedMs += (now - pomodoroRunStartedAt);
+            pomodoroRunning = false;
+          } else {
+            pomodoroRunning = true;
+            pomodoroRunStartedAt = now;
+            pomodoroCompleted = false;
+          }
+          beepClick(15);
+        } else if (activeTapCount == 2) {
+          // 2 Taps: RESET
+          pomodoroRunning = false;
+          pomodoroAccumulatedMs = 0;
+          pomodoroCompleted = false;
+          beepClick(25);
+        } else if (activeTapCount == 3) {
+          // 3 Taps: CYCLE DURATION
+          pomodoroRunning = false;
+          pomodoroAccumulatedMs = 0;
+          pomodoroCompleted = false;
+          currentOptionIndex = (currentOptionIndex + 1) % 5;
+          pomodoroDurationSec = (long)pomodoroOptions[currentOptionIndex] * 60;
+          char durToast[16];
+          snprintf(durToast, sizeof(durToast), "%d MIN TIMER", pomodoroOptions[currentOptionIndex]);
+          showToast(durToast, 1200);
+          beepClick(20);
+        } else if (activeTapCount == 4) {
+          // 4 Taps: Quick-switch to Stopwatch
+          currentAppState = STATE_STOPWATCH;
+          beepClick(15);
+        } else if (activeTapCount >= 5) {
+          // 5+ Taps: Direct Return to Home
+          currentAppState = STATE_HOME;
+          beepClick(15);
+        }
+      } else if (activeGesture == GESTURE_LONG_PRESS) {
+        // Long Press: Return to Menu
+        currentAppState = STATE_MENU;
+        beepClick(15);
+      }
+      break;
+
+    // ── 4. STOPWATCH SCREEN ─────────────────────────────────
+    case STATE_STOPWATCH:
+      if (activeGesture == GESTURE_TAPS) {
+        if (activeTapCount == 1) {
+          // 1 Tap: START / PAUSE / RESUME
+          if (stopwatchRunning) {
+            stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
+            stopwatchRunning = false;
+            saveStopwatch();
+          } else {
+            stopwatchRunning = true;
+            stopwatchRunStartedAt = now;
+          }
+          beepClick(15);
+        } else if (activeTapCount == 2) {
+          // 2 Taps: RESET
+          stopwatchRunning = false;
+          stopwatchAccumulatedMs = 0;
+          saveStopwatch();
+          beepClick(25);
+        } else if (activeTapCount == 3) {
+          // 3 Taps: Quick-switch to Pomodoro
+          if (stopwatchRunning) {
+            stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
+            stopwatchRunning = false;
+            saveStopwatch();
+          }
+          currentAppState = STATE_POMODORO;
+          beepClick(15);
+        } else if (activeTapCount >= 4) {
+          // 4+ Taps: Direct Return to Home
+          if (stopwatchRunning) {
+            stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
+            stopwatchRunning = false;
+            saveStopwatch();
+          }
+          currentAppState = STATE_HOME;
+          beepClick(15);
+        }
+      } else if (activeGesture == GESTURE_LONG_PRESS) {
+        // Long Press: Return to Menu
+        if (stopwatchRunning) {
+          stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
+          stopwatchRunning = false;
+          saveStopwatch();
+        }
+        currentAppState = STATE_MENU;
+        beepClick(15);
+      }
+      break;
+
+    // ── 5. TEMPORARY ANIMATION SCREENS ──────────────────────
+    case STATE_LOVE:
+    case STATE_CRAZY:
+      // Any touch or tap interrupts animation and returns Home immediately
+      currentAppState = STATE_HOME;
+      beepClick(10);
+      break;
+  }
+}
+
+// ============================================================
+//  MODULE 4: updateAnimations() — Non-blocking Eye & Face Animations
+// ============================================================
+float easeInOut(float t) {
+  t = constrain(t, 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+void updateAnimations(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  // Check completion of temporary animations
+  if (currentAppState == STATE_LOVE && (now - appStateStartTime > 3200)) {
+    currentAppState = STATE_HOME;
+  }
+  if (currentAppState == STATE_CRAZY && (now - appStateStartTime > 2500)) {
+    currentAppState = STATE_HOME;
+  }
+}
+
+// ============================================================
+//  MODULE 5: updateTimer() — Pomodoro Countdown & Auto-Reset
+// ============================================================
+void updateTimer(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  if (!pomodoroRunning) return;
+
+  uint32_t rem = getPomodoroRemainingSeconds(now);
+  if (rem == 0) {
+    // Countdown Finished
+    pomodoroRunning = false;
+    pomodoroCompleted = true;
+    pomodoroCompleteUntil = now + 2500; // Show FINISHED indicator for 2.5s
+    
+    // Triple completion alarm
+    for (int b = 0; b < 3; b++) {
+      beepAlarmPulse(450);
+      delay(40);
+    }
+
+    // Auto-reset back to selected duration in paused state
+    pomodoroAccumulatedMs = 0;
+    pomodoroCompleted = false;
+    lastWarningSec = 0;
+  } else if (rem <= 5) {
+    // 5-second countdown warning beeps at seconds 5, 4, 3, 2, 1
+    if (lastWarningSec != rem) {
+      lastWarningSec = rem;
+      int pitch = map(rem, 5, 1, 800, 400);
+      beepAlarmPulse(pitch);
+    }
+  }
+}
+
+// ============================================================
+//  MODULE 6: updateStopwatch() — Monotonic Stopwatch
+// ============================================================
+void updateStopwatch(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  // Monotonic calculation is handled cleanly inside getStopwatchTotalMs(now).
+  // No busy-wait or loop counter accumulation needed.
+}
+
+// ============================================================
+//  MODULE 7: updateClock() — RTC & Sensor Background Sampling
+// ============================================================
+void updateClock(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  // Sample DHT11 sensor periodically without blocking
+  if (now - lastSensorSample >= SENSOR_SAMPLE_INTERVAL) {
+    lastSensorSample = now;
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t)) indoorTemp = t;
+    if (!isnan(h)) indoorHum = h;
+  }
+}
+
+// ============================================================
+//  MODULE 8: handleTimeSync() — Asynchronous Wi-Fi & NTP Task
 // ============================================================
 TaskHandle_t networkTaskHandle = NULL;
 volatile bool netSyncRequested = false;
@@ -171,13 +541,12 @@ void networkWorkerTask(void* parameter) {
     if (netSyncRequested) {
       netSyncRequested = false;
       netTaskBusy = true;
-      syncIndicator = SYNC_RUNNING;
 
       const char* ssid = DESKBUDDY_WIFI_SSID;
       const char* pass = DESKBUDDY_WIFI_PASSWORD;
 
       if (strlen(ssid) > 0) {
-        Serial.println("[NET] Connecting Wi-Fi...");
+        Serial.println("[NET] Asynchronous Wi-Fi connecting...");
         WiFi.mode(WIFI_STA);
         WiFi.setTxPower(WIFI_POWER_8_5dBm);
         WiFi.begin(ssid, pass);
@@ -188,7 +557,7 @@ void networkWorkerTask(void* parameter) {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
-          Serial.println("[NET] Connected. Synchronizing NTP...");
+          Serial.println("[NET] Connected. Synchronizing NTP (IST)...");
           sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
           configTime(19800, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
 
@@ -207,27 +576,25 @@ void networkWorkerTask(void* parameter) {
           }
 
           if (success) {
-            Serial.println("[NET] NTP synchronized successfully.");
             clockSynchronized = true;
-            syncIndicator = SYNC_SUCCESS;
+            showToast("✓ TIME SYNCED", 2000);
+            Serial.println("[NET] Time successfully synchronized.");
           } else {
+            showToast("! NTP TIMEOUT", 2000);
             Serial.println("[NET] NTP sync timed out.");
-            syncIndicator = SYNC_FAILED;
           }
         } else {
+          showToast("! WIFI FAILED", 2000);
           Serial.println("[NET] Wi-Fi connection failed.");
-          syncIndicator = SYNC_FAILED;
         }
 
-        // Always power down Wi-Fi radio immediately after sync
+        // Always power off Wi-Fi modem immediately after sync to save power
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
       } else {
-        Serial.println("[NET] No Wi-Fi SSID configured.");
-        syncIndicator = SYNC_FAILED;
+        showToast("! NO WIFI SSID", 2000);
       }
 
-      syncIndicatorTime = millis();
       netTaskBusy = false;
     }
     vTaskDelay(pdMS_TO_TICKS(200));
@@ -240,9 +607,7 @@ void triggerNetworkSync() {
   }
 }
 
-// ============================================================
-//  BLUETOOTH LOW ENERGY (NimBLE Time Sync)
-// ============================================================
+// BLE NimBLE Callbacks
 class DeskBuddyTimeCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* characteristic) override {
     std::string raw = characteristic->getValue();
@@ -282,9 +647,43 @@ void startBleService() {
   NimBLEDevice::startAdvertising();
 }
 
+void handleTimeSync(unsigned long now = 0) {
+  if (now == 0) now = millis();
+
+  // Process pending BLE epoch synchronization
+  int64_t bleEpoch = 0;
+  portENTER_CRITICAL(&bleTimeMux);
+  if (pendingBleEpoch > 0) {
+    bleEpoch = pendingBleEpoch;
+    pendingBleEpoch = 0;
+  }
+  portEXIT_CRITICAL(&bleTimeMux);
+
+  if (bleEpoch > 0) {
+    struct timeval tv = { .tv_sec = (time_t)bleEpoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    clockSynchronized = true;
+    showToast("✓ BLE SYNCED", 2000);
+    beepClick(25);
+  }
+}
+
 // ============================================================
-//  OLED GRAPHICS HELPERS
+//  MODULE 9: renderScreen() — Crisp, Flicker-Free OLED Rendering
 // ============================================================
+
+// Helper: Heart Eye
+void drawHeartEye(int x, int y, int sz) {
+  u8g2.drawDisc(x - (sz / 2), y, sz / 2);
+  u8g2.drawDisc(x + (sz / 2), y, sz / 2);
+  u8g2.drawTriangle(x - sz, y + 1, x + sz, y + 1, x, y + sz + 8);
+  u8g2.setDrawColor(0);
+  u8g2.drawDisc(x, y + 2, 3);
+  u8g2.setDrawColor(1);
+  u8g2.drawPixel(x - (sz / 2) - 1, y - 2);
+}
+
+// Helper: Floating Tiny Heart
 void drawTinyHeart(int x, int y, int size) {
   int lobe = max(1, size / 2);
   u8g2.drawDisc(x - lobe, y, lobe);
@@ -292,22 +691,7 @@ void drawTinyHeart(int x, int y, int size) {
   u8g2.drawTriangle(x - size, y, x + size, y, x, y + size + 2);
 }
 
-void drawHeartEye(int x, int y, int sz, bool closed, int pupilOffset) {
-  if (closed) {
-    u8g2.drawCircle(x, y - 4, sz + 2, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-    u8g2.drawCircle(x, y - 5, sz + 2, U8G2_DRAW_LOWER_LEFT | U8G2_DRAW_LOWER_RIGHT);
-  } else {
-    u8g2.drawDisc(x - (sz / 2), y, sz / 2);
-    u8g2.drawDisc(x + (sz / 2), y, sz / 2);
-    u8g2.drawTriangle(x - sz, y + 1, x + sz, y + 1, x, y + sz + 8);
-    u8g2.setDrawColor(0);
-    u8g2.drawDisc(x + pupilOffset, y + 2, 3);
-    u8g2.setDrawColor(1);
-    u8g2.drawPixel(x - (sz / 2) - 1, y - 2);
-    u8g2.drawPixel(x - 3, y - 4);
-  }
-}
-
+// Helper: Star Eye
 void drawStarEye(int x, int y, int radius) {
   u8g2.drawRBox(x - radius, y - radius, radius * 2, radius * 2, 4);
   u8g2.setDrawColor(0);
@@ -320,41 +704,37 @@ void drawStarEye(int x, int y, int radius) {
   u8g2.setDrawColor(1);
 }
 
-// ============================================================
-//  SCREEN 1: MINIMAL HOME (ANIMATED EYES + SMALL CLOCK)
-// ============================================================
-void drawHome(unsigned long now) {
-  // ── A. Animated Robot Eyes (Upper Portion: Y = 2 to 46) ──
+// ── Screen: Home (Animated Eyes + Compact Clock) ─────────────
+void renderHome(unsigned long now) {
+  // Eye Animation Calculation
   static unsigned long lastBlinkTime = 0;
-  static bool blinking = false;
-  static unsigned long blinkStartTime = 0;
+  static bool isBlinking = false;
+  static unsigned long blinkStart = 0;
 
-  if (!blinking && (now - lastBlinkTime > 3200)) {
-    blinking = true;
-    blinkStartTime = now;
+  if (!isBlinking && (now - lastBlinkTime > 3400)) {
+    isBlinking = true;
+    blinkStart = now;
     lastBlinkTime = now;
   }
 
   float closure = 0.0f;
-  if (blinking) {
-    unsigned long bElapsed = now - blinkStartTime;
+  if (isBlinking) {
+    unsigned long bElapsed = now - blinkStart;
     if (bElapsed < 100) closure = (float)bElapsed / 100.0f;
     else if (bElapsed < 180) closure = 1.0f;
     else if (bElapsed < 280) closure = 1.0f - ((float)(bElapsed - 180) / 100.0f);
-    else blinking = false;
+    else isBlinking = false;
   }
 
-  // Gentle idle gaze and breath scale
-  int gazeOffset = (int)(sinf(now * 0.0015f) * 4.0f);
-  int eyeHeight = (int)((1.0f - closure) * 26.0f);
+  int gazeOffset = (int)(sinf(now * 0.0018f) * 4.0f);
+  int eyeHeight  = (int)((1.0f - closure) * 26.0f);
   if (eyeHeight < 2) eyeHeight = 2;
 
-  // Left Eye (centered at X=36, Y=22)
+  // Left & Right Eyes
   u8g2.drawRBox(36 - 15, 22 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
-  // Right Eye (centered at X=92, Y=22)
   u8g2.drawRBox(92 - 15, 22 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
 
-  // Pupils (cut out of open eyes)
+  // Pupils (visible when open)
   if (closure < 0.35f) {
     u8g2.setDrawColor(0);
     u8g2.drawRBox(36 - 3 + gazeOffset, 20, 6, 8, 1);
@@ -362,10 +742,10 @@ void drawHome(unsigned long now) {
     u8g2.setDrawColor(1);
   }
 
-  // Divider line
+  // Divider
   u8g2.drawLine(16, 46, 112, 46);
 
-  // ── B. Small Centered Clock (Lower Portion: Y = 48 to 64) ──
+  // Clock
   struct tm ti = {};
   bool timeValid = clockSynchronized && getLocalTime(&ti);
 
@@ -391,80 +771,79 @@ void drawHome(unsigned long now) {
   }
 
   u8g2.setFont(u8g2_font_helvB10_tf);
-  int clockWidth = u8g2.getStrWidth(timeStr);
-  int clockX = (128 - clockWidth) / 2;
-  u8g2.drawStr(clockX, 60, timeStr);
-
-  // Small unobtrusive sync status indicator
-  if (syncIndicator == SYNC_RUNNING) {
-    u8g2.setFont(u8g2_font_haxrcorp4089_tr);
-    u8g2.drawStr(108, 60, "SYNC");
-  } else if (syncIndicator == SYNC_SUCCESS && (now - syncIndicatorTime < 3000)) {
-    u8g2.setFont(u8g2_font_haxrcorp4089_tr);
-    u8g2.drawStr(112, 60, "OK");
-  } else if (syncIndicator == SYNC_FAILED && (now - syncIndicatorTime < 3000)) {
-    u8g2.setFont(u8g2_font_haxrcorp4089_tr);
-    u8g2.drawStr(112, 60, "ERR");
-  } else {
-    syncIndicator = SYNC_IDLE;
-  }
+  int w = u8g2.getStrWidth(timeStr);
+  u8g2.drawStr((128 - w) / 2, 60, timeStr);
 }
 
-// ============================================================
-//  SCREEN 2: 1 TAP — LOVE ANIMATION (HEART EYES + FLOATING HEARTS)
-// ============================================================
-void drawLoveAnimation(unsigned long now) {
-  unsigned long elapsed = now - stateStartTime;
-
-  // Heart pulse size using smooth sine beat
+// ── Screen: Love Animation (1 Tap) ───────────────────────────
+void renderLove(unsigned long now) {
+  unsigned long elapsed = now - appStateStartTime;
   float beat = sinf(elapsed * 0.007f);
   int heartSize = 14 + (int)(beat * 3.0f);
 
   // Pulsing Heart Eyes
-  drawHeartEye(36, 26, heartSize, false, 0);
-  drawHeartEye(92, 26, heartSize, false, 0);
+  drawHeartEye(36, 26, heartSize);
+  drawHeartEye(92, 26, heartSize);
 
-  // Floating Tiny Hearts drifting upward
+  // Upward Floating Hearts
   for (int i = 0; i < 4; i++) {
     unsigned long phase = (elapsed + (unsigned long)i * 650) % 2400;
     int y = 60 - (int)(phase * 52 / 2400);
-    int x = 64 + (int)(sinf((elapsed + i * 400) * 0.005f) * 18.0f) + (i % 2 == 0 ? -15 : 15);
+    int x = 64 + (int)(sinf((elapsed + i * 400) * 0.005f) * 18.0f) + (i % 2 == 0 ? -16 : 16);
     drawTinyHeart(x, y, 3);
   }
 
-  // Heartbeat sound pulse
+  // Soft Heartbeat Audio Tick
   if (elapsed % 750 < 20 || (elapsed % 750 > 130 && elapsed % 750 < 150)) {
     digitalWrite(BUZZER_PIN, HIGH);
     delayMicroseconds(140);
     digitalWrite(BUZZER_PIN, LOW);
   }
-
-  // Return automatically to HOME after 3.2 seconds
-  if (elapsed > 3200) {
-    currentState = STATE_HOME;
-  }
 }
 
-// ============================================================
-//  SCREEN 3: 2 TAPS — MINIMAL TIMER & STOPWATCH MENU
-// ============================================================
-void drawTimerMenu() {
+// ── Screen: Crazy Face (3 Taps) ──────────────────────────────
+void renderCrazy(unsigned long now) {
+  unsigned long elapsed = now - appStateStartTime;
+
+  int sX = random(-2, 3);
+  int sY = random(-2, 3);
+
+  // Star Eyes
+  int eyeRadius = 13 + ((elapsed % 200 < 100) ? 2 : 0);
+  drawStarEye(36 + sX, 22 + sY, eyeRadius);
+  drawStarEye(92 + sX, 22 + sY, eyeRadius);
+
+  // Funny open mouth with tongue
+  u8g2.drawTriangle(46 + sX, 44 + sY, 82 + sX, 44 + sY, 64 + sX, 60 + sY);
+  u8g2.setDrawColor(0);
+  u8g2.drawDisc(64 + sX, 55 + sY, 4);
+  u8g2.setDrawColor(1);
+
+  // Playful audio squeaks
+  digitalWrite(BUZZER_PIN, HIGH);
+  delayMicroseconds(random(40, 130));
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+// ── Screen: Minimal Menu (2 Taps) ────────────────────────────
+void renderMenu() {
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawBox(0, 0, 128, 12);
   u8g2.setDrawColor(0);
-  u8g2.drawStr(14, 9, "TIMER & STOPWATCH");
+  u8g2.drawStr(16, 9, "TIMER & STOPWATCH");
   u8g2.setDrawColor(1);
 
   const char* items[] = {
-    "1. POMODORO TIMER",
-    "2. STOPWATCH"
+    "1. TIMER",
+    "2. STOPWATCH",
+    "3. BACK"
   };
 
   u8g2.setFont(u8g2_font_7x14_tf);
-  for (int i = 0; i < 2; i++) {
-    int y = 28 + (i * 15);
-    if (menuSelection == i) {
-      u8g2.drawRBox(4, y - 10, 120, 13, 2);
+  for (int i = 0; i < 3; i++) {
+    int y = 26 + (i * 13);
+    if (menuIndex == i) {
+      u8g2.drawRBox(4, y - 10, 120, 12, 2);
       u8g2.setDrawColor(0);
       u8g2.drawStr(8, y, items[i]);
       u8g2.setDrawColor(1);
@@ -475,33 +854,31 @@ void drawTimerMenu() {
 
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawLine(0, 52, 128, 52);
-  u8g2.drawStr(4, 61, "1:NEXT   2/HOLD:SELECT   3:HOME");
+  u8g2.drawStr(4, 61, "1:NEXT   2/HOLD:SELECT   H:BACK");
 }
 
-// ============================================================
-//  SCREEN 4: POMODORO TIMER (LARGE DIGITS)
-// ============================================================
-void drawPomodoroScreen(unsigned long now) {
+// ── Screen: Pomodoro Timer ───────────────────────────────────
+void renderPomodoro(unsigned long now) {
   uint32_t remainingSec = getPomodoroRemainingSeconds(now);
 
-  // Top Bar: Duration & Small Running/Paused Indicator
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   char titleBuf[24];
-  snprintf(titleBuf, sizeof(titleBuf), "POMO %dM", pomodoroOptions[currentOptionIndex]);
+  snprintf(titleBuf, sizeof(titleBuf), "TIMER %dM", pomodoroOptions[currentOptionIndex]);
   u8g2.drawStr(4, 9, titleBuf);
 
-  const char* status = pomodoroRunning ? "RUNNING" :
-                       (pomodoroAccumulatedMs > 0 ? "PAUSED" : "READY");
-  u8g2.drawStr(86, 9, status);
+  const char* status = (now < pomodoroCompleteUntil) ? "FINISHED!" :
+                       (pomodoroRunning ? "RUNNING" :
+                       (pomodoroAccumulatedMs > 0 ? "PAUSED" : "READY"));
+  u8g2.drawStr(82, 9, status);
   u8g2.drawLine(0, 12, 128, 12);
 
-  // Large Readable Countdown Digits MM:SS
+  // Large Centered Digits MM:SS
   char timeBuf[12];
   snprintf(timeBuf, sizeof(timeBuf), "%02lu:%02lu", remainingSec / 60UL, remainingSec % 60UL);
   u8g2.setFont(u8g2_font_logisoso28_tn);
   int w = u8g2.getStrWidth(timeBuf);
 
-  // Visual flash on final 5 seconds
+  // Flashing inverted block on last 5 seconds
   if (remainingSec <= 5 && remainingSec > 0 && pomodoroRunning && ((now / 250) % 2 == 0)) {
     u8g2.setDrawColor(1);
     u8g2.drawRBox(10, 16, 108, 34, 3);
@@ -510,7 +887,7 @@ void drawPomodoroScreen(unsigned long now) {
   u8g2.drawStr((128 - w) / 2, 47, timeBuf);
   u8g2.setDrawColor(1);
 
-  // Minimal Footer Controls
+  // Footer Controls
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawLine(0, 52, 128, 52);
   const char* toggleCmd = pomodoroRunning ? "1:PAUSE" : (pomodoroAccumulatedMs > 0 ? "1:RESUME" : "1:START");
@@ -520,25 +897,22 @@ void drawPomodoroScreen(unsigned long now) {
   u8g2.drawStr(96, 61, "H:MENU");
 }
 
-// ============================================================
-//  SCREEN 5: STOPWATCH (LARGE DIGITS)
-// ============================================================
-void drawStopwatchScreen(unsigned long now) {
+// ── Screen: Stopwatch ────────────────────────────────────────
+void renderStopwatch(unsigned long now) {
   uint64_t totalMs = getStopwatchTotalMs(now);
   uint64_t totalSec = totalMs / 1000ULL;
   uint64_t hours = totalSec / 3600ULL;
   uint64_t minutes = (totalSec / 60ULL) % 60ULL;
   uint64_t seconds = totalSec % 60ULL;
 
-  // Top Bar: Title & Small Running/Paused Indicator
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawStr(4, 9, "STOPWATCH");
   const char* status = stopwatchRunning ? "RUNNING" :
                        (stopwatchAccumulatedMs > 0 ? "PAUSED" : "READY");
-  u8g2.drawStr(86, 9, status);
+  u8g2.drawStr(82, 9, status);
   u8g2.drawLine(0, 12, 128, 12);
 
-  // Large Readable Elapsed Digits
+  // Large Centered Digits
   char watchBuf[16];
   if (hours > 0) {
     snprintf(watchBuf, sizeof(watchBuf), "%02llu:%02llu:%02llu",
@@ -548,7 +922,7 @@ void drawStopwatchScreen(unsigned long now) {
     int w = u8g2.getStrWidth(watchBuf);
     u8g2.drawStr((128 - w) / 2, 45, watchBuf);
   } else {
-    // MM:SS format with tenths of a second
+    // MM:SS format with tenths
     uint64_t tenths = (totalMs % 1000ULL) / 100ULL;
     snprintf(watchBuf, sizeof(watchBuf), "%02llu:%02llu.%llu",
              (unsigned long long)minutes, (unsigned long long)seconds, (unsigned long long)tenths);
@@ -557,7 +931,7 @@ void drawStopwatchScreen(unsigned long now) {
     u8g2.drawStr((128 - w) / 2, 46, watchBuf);
   }
 
-  // Minimal Footer Controls
+  // Footer Controls
   u8g2.setFont(u8g2_font_haxrcorp4089_tr);
   u8g2.drawLine(0, 52, 128, 52);
   const char* toggleCmd = stopwatchRunning ? "1:PAUSE" : (stopwatchAccumulatedMs > 0 ? "1:RESUME" : "1:START");
@@ -567,36 +941,42 @@ void drawStopwatchScreen(unsigned long now) {
   u8g2.drawStr(96, 61, "H:MENU");
 }
 
-// ============================================================
-//  SCREEN 6: 3 TAPS — CRAZY FACE (STAR EYES + SCREEN SHAKE)
-// ============================================================
-void drawCrazyFace(unsigned long now) {
-  unsigned long elapsed = now - stateStartTime;
+// ── Screen: Toast Notification Overlay ───────────────────────
+void renderToast(unsigned long now) {
+  if (now < toastEndTime && strlen(toastMessage) > 0) {
+    u8g2.setFont(u8g2_font_7x14_tf);
+    int w = u8g2.getStrWidth(toastMessage);
+    int boxW = w + 16;
+    int boxX = (128 - boxW) / 2;
+    int boxY = 24;
 
-  // Screen-shake offset
-  int sX = random(-2, 3);
-  int sY = random(-2, 3);
-
-  // Star Eyes
-  int eyeRadius = 13 + ((elapsed % 200 < 100) ? 2 : 0);
-  drawStarEye(36 + sX, 22 + sY, eyeRadius);
-  drawStarEye(92 + sX, 22 + sY, eyeRadius);
-
-  // Open funny triangle mouth with tongue
-  u8g2.drawTriangle(46 + sX, 44 + sY, 82 + sX, 44 + sY, 64 + sX, 60 + sY);
-  u8g2.setDrawColor(0);
-  u8g2.drawDisc(64 + sX, 55 + sY, 4);
-  u8g2.setDrawColor(1);
-
-  // Playful audio squeaks
-  digitalWrite(BUZZER_PIN, HIGH);
-  delayMicroseconds(random(40, 140));
-  digitalWrite(BUZZER_PIN, LOW);
-
-  // Return automatically to HOME after 2.5 seconds
-  if (elapsed > 2500) {
-    currentState = STATE_HOME;
+    // Inverted rounded badge overlay
+    u8g2.setDrawColor(1);
+    u8g2.drawRBox(boxX, boxY, boxW, 18, 3);
+    u8g2.setDrawColor(0);
+    u8g2.drawStr(boxX + 8, boxY + 14, toastMessage);
+    u8g2.setDrawColor(1);
   }
+}
+
+// ── Master Screen Render Dispatcher ──────────────────────────
+void renderScreen(unsigned long now = 0) {
+  if (now == 0) now = millis();
+  u8g2.clearBuffer();
+
+  switch (currentAppState) {
+    case STATE_HOME:      renderHome(now);      break;
+    case STATE_LOVE:      renderLove(now);      break;
+    case STATE_MENU:      renderMenu();         break;
+    case STATE_POMODORO:  renderPomodoro(now);  break;
+    case STATE_STOPWATCH: renderStopwatch(now); break;
+    case STATE_CRAZY:     renderCrazy(now);     break;
+  }
+
+  // Render non-blocking toast overlay on top if active
+  renderToast(now);
+
+  u8g2.sendBuffer();
 }
 
 // ============================================================
@@ -612,20 +992,20 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(400000);
   u8g2.begin();
+  dht.begin();
 
   // Configure India Standard Time (UTC+05:30)
   setenv("TZ", "IST-5:30", 1);
   tzset();
 
   settings.begin("deskbuddy", false);
-  // Restore persisted clock format & stopwatch
   clockFormat = settings.getInt("clk_fmt", 1);
   stopwatchAccumulatedMs = settings.getULong64("sw_ms", 0);
 
   // Start BLE time sync service
   startBleService();
 
-  // Create background network worker task
+  // Create background network worker task for async Wi-Fi & NTP
   xTaskCreate(
     networkWorkerTask,
     "net_worker",
@@ -635,270 +1015,39 @@ void setup() {
     &networkTaskHandle
   );
 
-  // Trigger initial network sync if Wi-Fi is configured
+  // Initial network sync at boot if Wi-Fi SSID is configured
   if (strlen(DESKBUDDY_WIFI_SSID) > 0) {
     triggerNetworkSync();
   }
 
-  touchCurrentState = (digitalRead(TOUCH_PIN) == (TOUCH_ACTIVE_LOW ? LOW : HIGH));
-  touchDebouncedState = touchCurrentState;
-  lastFrameAt = millis();
-
   beepClick(15);
-  Serial.println("[SYSTEM] DeskBuddy Minimal Firmware Started.");
+  Serial.println("[SYSTEM] DeskBuddy Refactored Firmware Running.");
 }
 
 // ============================================================
-//  loop()
+//  loop() — Clean Modular Non-Blocking Main Loop
 // ============================================================
+unsigned long lastFrameTimestamp = 0;
+const unsigned long TARGET_FRAME_MS = 16; // ~60 FPS
+
 void loop() {
   unsigned long now = millis();
-  u8g2.clearBuffer();
 
-  // ── 1. BLE TIME SYNCHRONIZATION EVENT ───────────────────
-  int64_t bleEpoch = 0;
-  portENTER_CRITICAL(&bleTimeMux);
-  if (pendingBleEpoch > 0) {
-    bleEpoch = pendingBleEpoch;
-    pendingBleEpoch = 0;
+  // Modular Non-Blocking Execution Pipeline
+  handleInput(now);
+  processGestures(now);
+  updateApplicationState(now);
+  updateAnimations(now);
+  updateTimer(now);
+  updateStopwatch(now);
+  updateClock(now);
+  handleTimeSync(now);
+  renderScreen(now);
+
+  // Frame Pacing (Target ~60 FPS)
+  unsigned long frameElapsed = millis() - lastFrameTimestamp;
+  if (frameElapsed < TARGET_FRAME_MS) {
+    delay(TARGET_FRAME_MS - frameElapsed);
   }
-  portEXIT_CRITICAL(&bleTimeMux);
-
-  if (bleEpoch > 0) {
-    struct timeval tv = { .tv_sec = (time_t)bleEpoch, .tv_usec = 0 };
-    settimeofday(&tv, NULL);
-    clockSynchronized = true;
-    syncIndicator = SYNC_SUCCESS;
-    syncIndicatorTime = now;
-    beepClick(25);
-    Serial.printf("[BLE] Time set: %lld\n", (long long)bleEpoch);
-  }
-
-  // ── 2. TOUCH SENSING & DEBOUNCING ────────────────────────
-  bool rawReading = (digitalRead(TOUCH_PIN) == (TOUCH_ACTIVE_LOW ? LOW : HIGH));
-  if (rawReading != touchCurrentState) {
-    touchCurrentState = rawReading;
-    touchLastDebounceTime = now;
-  }
-
-  bool prevDebounced = touchDebouncedState;
-  if ((now - touchLastDebounceTime) >= TOUCH_DEBOUNCE_MS) {
-    touchDebouncedState = touchCurrentState;
-  }
-  bool touching = touchDebouncedState;
-
-  // Rising Edge (Touch Down)
-  if (touching && !prevDebounced) {
-    touchStartTime = now;
-    longPressHandled = false;
-  }
-
-  // Long Press Detection (>800ms)
-  if (touching && !longPressHandled && (now - touchStartTime >= LONG_PRESS_MS)) {
-    longPressHandled = true;
-
-    if (currentState == STATE_TIMER_MENU) {
-      // Long press in menu selects highlighted item
-      if (menuSelection == 0) currentState = STATE_POMODORO;
-      else currentState = STATE_STOPWATCH;
-      beepClick(20);
-      tapCount = 0;
-    } else if (currentState == STATE_POMODORO || currentState == STATE_STOPWATCH) {
-      // Long press in Pomodoro/Stopwatch returns to Menu
-      currentState = STATE_TIMER_MENU;
-      beepClick(15);
-      tapCount = 0;
-    }
-  }
-
-  // Falling Edge (Touch Released)
-  if (!touching && prevDebounced) {
-    if (longPressHandled) {
-      // Prevent long-press release from counting as a tap
-      longPressHandled = false;
-      tapCount = 0;
-    } else {
-      tapCount++;
-      lastTapRelease = now;
-      beepTapFeedback(tapCount); // Immediate audible acknowledgment
-    }
-  }
-
-  // ── 3. TAP SEQUENCE RESOLUTION ───────────────────────────
-  if (tapCount > 0 && !touching && (now - lastTapRelease >= TAP_GAP_MS)) {
-    if (currentState == STATE_TIMER_MENU) {
-      if (tapCount == 1) {
-        // 1 Tap: Toggle selection between Pomodoro and Stopwatch
-        menuSelection = (menuSelection + 1) % 2;
-        beepClick(10);
-      } else if (tapCount == 2) {
-        // 2 Taps: Open selected
-        if (menuSelection == 0) currentState = STATE_POMODORO;
-        else currentState = STATE_STOPWATCH;
-        beepClick(20);
-      } else if (tapCount >= 3) {
-        // 3 Taps: Return to Home
-        currentState = STATE_HOME;
-        beepClick(15);
-      }
-    } else if (currentState == STATE_POMODORO) {
-      if (tapCount == 1) {
-        // 1 Tap: START / PAUSE / RESUME
-        if (pomodoroRunning) {
-          pomodoroAccumulatedMs += (now - pomodoroRunStartedAt);
-          pomodoroRunning = false;
-        } else {
-          pomodoroRunning = true;
-          pomodoroRunStartedAt = now;
-          pomodoroCompleted = false;
-        }
-        beepClick(15);
-      } else if (tapCount == 2) {
-        // 2 Taps: RESET
-        pomodoroRunning = false;
-        pomodoroAccumulatedMs = 0;
-        pomodoroCompleted = false;
-        beepClick(25);
-      } else if (tapCount == 3) {
-        // 3 Taps: CYCLE DURATION (50 -> 25 -> 10 -> 5 -> 1 min)
-        pomodoroRunning = false;
-        pomodoroAccumulatedMs = 0;
-        pomodoroCompleted = false;
-        currentOptionIndex = (currentOptionIndex + 1) % 5;
-        pomodoroDurationSec = (long)pomodoroOptions[currentOptionIndex] * 60;
-        beepClick(20);
-      } else if (tapCount == 4) {
-        // 4 Taps: Switch directly to Stopwatch
-        currentState = STATE_STOPWATCH;
-        beepClick(15);
-      } else if (tapCount >= 5) {
-        // 5 Taps: Return to Menu
-        currentState = STATE_TIMER_MENU;
-        beepClick(15);
-      }
-    } else if (currentState == STATE_STOPWATCH) {
-      if (tapCount == 1) {
-        // 1 Tap: START / PAUSE / RESUME
-        if (stopwatchRunning) {
-          stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-          stopwatchRunning = false;
-          saveStopwatch();
-        } else {
-          stopwatchRunning = true;
-          stopwatchRunStartedAt = now;
-        }
-        beepClick(15);
-      } else if (tapCount == 2) {
-        // 2 Taps: RESET to 0
-        stopwatchRunning = false;
-        stopwatchAccumulatedMs = 0;
-        saveStopwatch();
-        beepClick(25);
-      } else if (tapCount == 3) {
-        // 3 Taps: Switch directly to Pomodoro
-        if (stopwatchRunning) {
-          stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-          stopwatchRunning = false;
-          saveStopwatch();
-        }
-        currentState = STATE_POMODORO;
-        beepClick(15);
-      } else if (tapCount >= 4) {
-        // 4 Taps: Return to Menu
-        if (stopwatchRunning) {
-          stopwatchAccumulatedMs += (uint32_t)(now - stopwatchRunStartedAt);
-          stopwatchRunning = false;
-          saveStopwatch();
-        }
-        currentState = STATE_TIMER_MENU;
-        beepClick(15);
-      }
-    } else {
-      // ── GLOBAL 5 GESTURES (FROM HOME OR ACTIVE ANIMATION) ──
-      if (tapCount == 1) {
-        // 1 Tap: Love Animation ❤️
-        currentState   = STATE_LOVE;
-        stateStartTime = now;
-      } else if (tapCount == 2) {
-        // 2 Taps: Timer & Stopwatch Menu ⏱️
-        currentState  = STATE_TIMER_MENU;
-        menuSelection = 0;
-        beepClick(15);
-      } else if (tapCount == 3) {
-        // 3 Taps: Crazy Face 🤪
-        currentState   = STATE_CRAZY;
-        stateStartTime = now;
-      } else if (tapCount == 4) {
-        // 4 Taps: Cycle Clock Format 🕒 (12H, 12H+sec, 24H, 24H+sec) & Persist
-        clockFormat = (clockFormat + 1) % 4;
-        settings.putInt("clk_fmt", clockFormat);
-        beepClick(20);
-      } else if (tapCount == 5) {
-        // 5 Taps: Manual Wi-Fi & NTP Time Sync 🔄
-        triggerNetworkSync();
-        beepClick(25);
-      }
-    }
-    tapCount = 0;
-  }
-
-  // ── 4. POMODORO TIMER TICK & AUTO-RESET ───────────────────
-  if (pomodoroRunning) {
-    uint32_t rem = getPomodoroRemainingSeconds(now);
-    if (rem == 0) {
-      // Timer finished: Triple alarm tone & auto-reset to selected duration
-      pomodoroRunning = false;
-      pomodoroCompleted = true;
-      for (int b = 0; b < 3; b++) {
-        beepAlarmPulse(450);
-        delay(40);
-      }
-      pomodoroAccumulatedMs = 0;
-      pomodoroCompleted = false;
-      lastWarningSec = 0;
-    } else if (rem <= 5) {
-      // 5-second countdown warning beeps at 5, 4, 3, 2, 1
-      if (lastWarningSec != rem) {
-        lastWarningSec = rem;
-        int pitch = map(rem, 5, 1, 800, 400);
-        beepAlarmPulse(pitch);
-      }
-    }
-  }
-
-  // ── 5. STATE RENDERING PIPELINE ──────────────────────────
-  switch (currentState) {
-    case STATE_HOME:
-      drawHome(now);
-      break;
-
-    case STATE_LOVE:
-      drawLoveAnimation(now);
-      break;
-
-    case STATE_TIMER_MENU:
-      drawTimerMenu();
-      break;
-
-    case STATE_POMODORO:
-      drawPomodoroScreen(now);
-      break;
-
-    case STATE_STOPWATCH:
-      drawStopwatchScreen(now);
-      break;
-
-    case STATE_CRAZY:
-      drawCrazyFace(now);
-      break;
-  }
-
-  u8g2.sendBuffer();
-
-  // Smooth frame pacing
-  unsigned long frameElapsed = millis() - lastFrameAt;
-  if (frameElapsed < FRAME_INTERVAL_MS) {
-    delay(FRAME_INTERVAL_MS - frameElapsed);
-  }
-  lastFrameAt = millis();
+  lastFrameTimestamp = millis();
 }
