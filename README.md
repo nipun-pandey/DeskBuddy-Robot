@@ -23,10 +23,10 @@ DeskBuddy uses a simple, intuitive single-button / touch input scheme with only 
 The SH1106 128×64 OLED display presents an uncluttered, modern interface:
 
 - **Home Screen:**
-  - Expressive robot eyes with natural eye-blinking animation every few seconds and gentle idle gaze.
-  - A clean horizontal divider.
-  - Centered clock in your chosen persisted format.
-  - Subtle unobtrusive sync indicator (`SYNC`, `OK`, or `ERR`).
+  - **Top Bar**: Date (e.g. `WED, 28 OCT`) and timezone (`IST`).
+  - **Center**: Large digital clock in your selected persisted format (`12H`, `12H+sec`, `24H`, `24H+sec`).
+  - **Bottom Bar**: Real-time ambient sensor readings from the DHT11 sensor: **Temperature** (e.g. `29.0°C`) and **Humidity** (e.g. `68%`).
+  - **Every 1 Minute**: Automatically displays the expressive robotic blinking eyes animation for 2 seconds with an audible chirp, then smoothly returns to the time/temp/humidity dashboard. Touching or tapping during the blink dismisses it instantly.
 - **Timer & Stopwatch Menu (2 Taps):**
   - Minimal 2-item list: `1. POMODORO TIMER` and `2. STOPWATCH`.
   - `1 Tap`: Cycle selection.

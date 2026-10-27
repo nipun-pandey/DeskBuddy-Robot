@@ -125,6 +125,8 @@ unsigned long pomodoroCompleteUntil = 0;
 uint32_t lastWarningSec     = 0;
 unsigned long pomodoroMinuteBlinkUntil = 0; // 2-second eye blink overlay every minute
 long pomodoroMinuteLastChecked = 25;
+unsigned long homeMinuteBlinkUntil = 0;     // 2-second eye blink overlay every minute on Home screen
+int lastHomeMinute = -1;
 
 uint32_t getPomodoroRemainingSeconds(unsigned long now) {
   if (pomodoroCompleted) return 0;
@@ -302,6 +304,10 @@ void updateApplicationState(unsigned long now = 0) {
   switch (currentAppState) {
     // ── 1. HOME SCREEN (GLOBAL GESTURES) ────────────────────
     case STATE_HOME:
+      if (now < homeMinuteBlinkUntil) {
+        homeMinuteBlinkUntil = 0; // Dismiss eye blink immediately on touch
+      }
+
       if (activeGesture == GESTURE_TAPS) {
         if (activeTapCount == 1) {
           // 1 Tap — Love Animation
@@ -514,6 +520,25 @@ void updateAnimations(unsigned long now = 0) {
   }
   if (currentAppState == STATE_CRAZY && (now - appStateStartTime > 2500)) {
     currentAppState = STATE_HOME;
+  }
+
+  // Home screen 1-minute completion robotic eye blink trigger (2 seconds)
+  if (currentAppState == STATE_HOME) {
+    struct tm ti = {};
+    if (clockSynchronized && getLocalTime(&ti, 20)) {
+      if (ti.tm_min != lastHomeMinute) {
+        lastHomeMinute = ti.tm_min;
+        homeMinuteBlinkUntil = now + 2000;
+        beepClick(10);
+      }
+    } else {
+      static unsigned long lastHomeSecTick = 0;
+      if (now - lastHomeSecTick >= 60000) {
+        lastHomeSecTick = now;
+        homeMinuteBlinkUntil = now + 2000;
+        beepClick(10);
+      }
+    }
   }
 }
 
@@ -836,8 +861,8 @@ void handleTimeSync(unsigned long now = 0) {
         } else if (strcasecmp(serialCmdBuf, "STATUS") == 0) {
           struct tm ti = {};
           getLocalTime(&ti, 50);
-          Serial.printf("[STATUS] SSID: '%s', Clock Synced: %d, Time: %02d:%02d:%02d\n",
-                        configuredSsid, clockSynchronized, ti.tm_hour, ti.tm_min, ti.tm_sec);
+          Serial.printf("[STATUS] SSID: '%s', Clock Synced: %d, Time: %02d:%02d:%02d, Temp: %.1f C, Hum: %.1f %%\n",
+                        configuredSsid, clockSynchronized, ti.tm_hour, ti.tm_min, ti.tm_sec, indoorTemp, indoorHum);
         }
         serialCmdIdx = 0;
       }
@@ -883,75 +908,151 @@ void drawStarEye(int x, int y, int radius) {
   u8g2.setDrawColor(1);
 }
 
-// ── Screen: Home (Animated Eyes + Compact Clock) ─────────────
-void renderHome(unsigned long now) {
-  // Eye Animation Calculation
-  static unsigned long lastBlinkTime = 0;
-  static bool isBlinking = false;
-  static unsigned long blinkStart = 0;
-
-  if (!isBlinking && (now - lastBlinkTime > 3400)) {
-    isBlinking = true;
-    blinkStart = now;
-    lastBlinkTime = now;
-  }
-
+// ── Helper: Home Screen 1-Minute Completion Robotic Blinking Eyes ──
+void renderHomeBlinkingEyes(unsigned long now) {
+  unsigned long animElapsed = now - (homeMinuteBlinkUntil - 2000);
   float closure = 0.0f;
-  if (isBlinking) {
-    unsigned long bElapsed = now - blinkStart;
-    if (bElapsed < 100) closure = (float)bElapsed / 100.0f;
-    else if (bElapsed < 180) closure = 1.0f;
-    else if (bElapsed < 280) closure = 1.0f - ((float)(bElapsed - 180) / 100.0f);
-    else isBlinking = false;
-  }
+  if (animElapsed < 250) closure = (float)animElapsed / 250.0f;
+  else if (animElapsed < 500) closure = 1.0f;
+  else if (animElapsed < 750) closure = 1.0f - ((float)(animElapsed - 500) / 250.0f);
+  else if (animElapsed < 1250) closure = 0.0f;
+  else if (animElapsed < 1500) closure = (float)(animElapsed - 1250) / 250.0f;
+  else if (animElapsed < 1750) closure = 1.0f;
+  else closure = 1.0f - ((float)(animElapsed - 1750) / 250.0f);
 
-  int gazeOffset = (int)(sinf(now * 0.0018f) * 4.0f);
+  int gazeOffset = (int)(sinf(now * 0.005f) * 4.0f);
   int eyeHeight  = (int)((1.0f - closure) * 26.0f);
   if (eyeHeight < 2) eyeHeight = 2;
 
-  // Left & Right Eyes
-  u8g2.drawRBox(36 - 15, 22 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
-  u8g2.drawRBox(92 - 15, 22 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
+  // Left & Right Expressive Robot Eyes
+  u8g2.drawRBox(36 - 15, 25 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
+  u8g2.drawRBox(92 - 15, 25 - (eyeHeight / 2), 30, eyeHeight, min(5, eyeHeight / 2));
 
   // Pupils (visible when open)
-  if (closure < 0.35f) {
+  if (closure < 0.4f) {
     u8g2.setDrawColor(0);
-    u8g2.drawRBox(36 - 3 + gazeOffset, 20, 6, 8, 1);
-    u8g2.drawRBox(92 - 3 + gazeOffset, 20, 6, 8, 1);
+    u8g2.drawRBox(36 - 3 + gazeOffset, 23, 6, 8, 1);
+    u8g2.drawRBox(92 - 3 + gazeOffset, 23, 6, 8, 1);
     u8g2.setDrawColor(1);
   }
 
-  // Divider
-  u8g2.drawLine(16, 46, 112, 46);
+  // Footer banner during the 2-second blink: shows Time, Temp & Hum
+  u8g2.drawLine(0, 48, 128, 48);
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+  char cBuf[12];
+  getCompactClockStr(cBuf, sizeof(cBuf));
+  char banner[40];
+  if (!isnan(indoorTemp) && !isnan(indoorHum)) {
+    snprintf(banner, sizeof(banner), "%s  |  %.0fC  |  %.0f%%", cBuf, indoorTemp, indoorHum);
+  } else {
+    snprintf(banner, sizeof(banner), "%s  |  DESKBUDDY", cBuf);
+  }
+  int bW = u8g2.getStrWidth(banner);
+  u8g2.drawStr((128 - bW) / 2, 59, banner);
+}
 
-  // Clock
+// ── Screen: Home (Digital Clock, Temperature & Humidity) ─────────────
+void renderHome(unsigned long now) {
+  // If 1-minute completion eye animation is active, show robotic blinking eyes for 2 seconds!
+  if (now < homeMinuteBlinkUntil) {
+    renderHomeBlinkingEyes(now);
+    return;
+  }
+
   struct tm ti = {};
-  bool timeValid = clockSynchronized && getLocalTime(&ti);
+  bool timeValid = clockSynchronized && getLocalTime(&ti, 50);
 
+  // 1. Top Bar: Date / Header & Status
+  u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+  if (timeValid) {
+    const char* days[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+    const char* months[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    char dateBuf[20];
+    snprintf(dateBuf, sizeof(dateBuf), "%s, %d %s", days[ti.tm_wday], ti.tm_mday, months[ti.tm_mon]);
+    u8g2.drawStr(2, 9, dateBuf);
+  } else {
+    u8g2.drawStr(2, 9, "DESKBUDDY");
+  }
+
+  const char* tzLabel = clockSynchronized ? "IST" : "--";
+  int tzW = u8g2.getStrWidth(tzLabel);
+  u8g2.drawStr(126 - tzW, 9, tzLabel);
+  u8g2.drawLine(0, 11, 128, 11);
+
+  // 2. Middle: Large Digital Clock
   char timeStr[20];
   if (!timeValid) {
     if (clockFormat == 1 || clockFormat == 3) strncpy(timeStr, "--:--:--", sizeof(timeStr));
     else strncpy(timeStr, "--:--", sizeof(timeStr));
+    u8g2.setFont(u8g2_font_helvB14_tf);
+    int w = u8g2.getStrWidth(timeStr);
+    u8g2.drawStr((128 - w) / 2, 33, timeStr);
   } else {
     int h12 = ti.tm_hour % 12;
     if (h12 == 0) h12 = 12;
     const char* suffix = (ti.tm_hour >= 12) ? "PM" : "AM";
-    const char* sChar  = (ti.tm_hour >= 12) ? "P"  : "A";
 
     if (clockFormat == 0) {
-      snprintf(timeStr, sizeof(timeStr), "%d:%02d %s", h12, ti.tm_min, suffix);
+      // 12-Hour without seconds: Extra large digits
+      snprintf(timeStr, sizeof(timeStr), "%d:%02d", h12, ti.tm_min);
+      u8g2.setFont(u8g2_font_logisoso24_tn);
+      int w = u8g2.getStrWidth(timeStr);
+      int startX = (128 - (w + 18)) / 2;
+      u8g2.drawStr(startX, 37, timeStr);
+      u8g2.setFont(u8g2_font_haxrcorp4089_tr);
+      u8g2.drawStr(startX + w + 4, 25, suffix);
     } else if (clockFormat == 1) {
-      snprintf(timeStr, sizeof(timeStr), "%d:%02d:%02d %s", h12, ti.tm_min, ti.tm_sec, sChar);
+      // 12-Hour with seconds: Clean bold font
+      snprintf(timeStr, sizeof(timeStr), "%d:%02d:%02d %s", h12, ti.tm_min, ti.tm_sec, suffix);
+      u8g2.setFont(u8g2_font_helvB12_tf);
+      int w = u8g2.getStrWidth(timeStr);
+      u8g2.drawStr((128 - w) / 2, 33, timeStr);
     } else if (clockFormat == 2) {
+      // 24-Hour without seconds: Extra large digits
       snprintf(timeStr, sizeof(timeStr), "%02d:%02d", ti.tm_hour, ti.tm_min);
+      u8g2.setFont(u8g2_font_logisoso26_tn);
+      int w = u8g2.getStrWidth(timeStr);
+      u8g2.drawStr((128 - w) / 2, 37, timeStr);
     } else {
+      // 24-Hour with seconds: Clean bold font
       snprintf(timeStr, sizeof(timeStr), "%02d:%02d:%02d", ti.tm_hour, ti.tm_min, ti.tm_sec);
+      u8g2.setFont(u8g2_font_helvB14_tf);
+      int w = u8g2.getStrWidth(timeStr);
+      u8g2.drawStr((128 - w) / 2, 33, timeStr);
     }
   }
 
-  u8g2.setFont(u8g2_font_helvB10_tf);
-  int w = u8g2.getStrWidth(timeStr);
-  u8g2.drawStr((128 - w) / 2, 60, timeStr);
+  // 3. Divider Line
+  u8g2.drawLine(0, 44, 128, 44);
+
+  // 4. Bottom Area: Temperature & Humidity from DHT11 Sensor
+  u8g2.setFont(u8g2_font_7x14_tf);
+  char envLine[32];
+  if (!isnan(indoorTemp) && !isnan(indoorHum)) {
+    snprintf(envLine, sizeof(envLine), "%.1f C   |   %.0f%%", indoorTemp, indoorHum);
+  } else if (!isnan(indoorTemp)) {
+    snprintf(envLine, sizeof(envLine), "%.1f C   |   --%%", indoorTemp);
+  } else if (!isnan(indoorHum)) {
+    snprintf(envLine, sizeof(envLine), "-- C   |   %.0f%%", indoorHum);
+  } else {
+    snprintf(envLine, sizeof(envLine), "-- C   |   --%%");
+  }
+
+  int envW = u8g2.getStrWidth(envLine);
+  int envX = (128 - envW) / 2;
+  int envY = 59;
+  u8g2.drawStr(envX, envY, envLine);
+
+  // Draw degree symbol circle above the space before 'C'
+  if (!isnan(indoorTemp)) {
+    char numBuf[8];
+    snprintf(numBuf, sizeof(numBuf), "%.1f", indoorTemp);
+    int numW = u8g2.getStrWidth(numBuf);
+    u8g2.drawCircle(envX + numW + 2, envY - 8, 1);
+  } else {
+    int numW = u8g2.getStrWidth("--");
+    u8g2.drawCircle(envX + numW + 2, envY - 8, 1);
+  }
 }
 
 // ── Screen: Love Animation (1 Tap) ───────────────────────────
